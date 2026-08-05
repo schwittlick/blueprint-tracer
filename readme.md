@@ -14,7 +14,7 @@ export to **SVG** and a **raw-geometry JSON** of polylines.
 | Decision | Choice |
 |---|---|
 | Output formats | SVG + raw geometry JSON (polylines) |
-| What to extract | Everything, as-is — faithful trace, no classification/OCR |
+| What to extract | Everything, as-is — faithful trace by default; OCR/Hershey opt-in per region |
 | Trace style | Centerline (each ink stroke → one path; width stored as an attribute) |
 | Curve model | Polylines only (straight segments) |
 | Input quality | Mixed — clean scans, photos, and degraded/aged originals |
@@ -33,11 +33,11 @@ text, and title blocks — used as the working test set.
 
 ## Status
 
-**Milestones 1–4 built and working: headless core, CLI, and the GUI.** Traces
-the `data/` samples faithfully (geometry, hatching, dimension lines, text, title
-blocks) into SVG + JSON. Full resolution 15.5 MP (MT-1.03, 3307×4675) runs in
-~4 s; plot-ordering cuts pen-up travel by ~99 %. Next: optional OCR / text
-layer (see [Roadmap](#roadmap)).
+**Headless core, CLI, GUI and the optional text layer are all built and working.**
+Traces the `data/` samples faithfully (geometry, hatching, dimension lines, text,
+title blocks) into SVG + JSON + PNG. Full resolution 15.5 MP (MT-1.03, 3307×4675)
+runs in ~4 s; plot-ordering cuts pen-up travel by ~99 %. Detected lettering can be
+OCR'd and re-drawn in a single-stroke Hershey font, per region, under review.
 
 ### The GUI
 
@@ -58,9 +58,50 @@ uv run blueprint-tracer-gui data/MT-1.02.tif
 - **Editing** — click or rubber-band to select (shift extends), then *Delete*,
   *Join* (`J`), or *Straighten* (`T`). Tick *Nodes* to drag individual vertices.
   Full undo/redo (`Ctrl+Z` / `Ctrl+Shift+Z`).
-- **Projects** — save the image reference, parameters *and* your manual edits to
-  a `.btproj` so a session is resumable; re-tracing warns before discarding edits.
-- **Export** — `Ctrl+E` writes the SVG and JSON exactly as shown, edits included.
+- **Text regions** — detected lettering is listed in its own dock with a crop
+  preview per region. See [Text and OCR](#text-and-ocr) below.
+- **Projects** — save the image reference, parameters, your manual edits *and*
+  your text-region decisions to a `.btproj` so a session is resumable;
+  re-tracing warns before discarding edits.
+- **Export** — `Ctrl+E` writes `name.svg`, `name.json` and `name_trace.png`
+  (a raster of the trace) exactly as shown, edits and text decisions included.
+
+### Text and OCR
+
+Lettering is detected automatically and listed in the **Text regions** dock. Each
+region shows a crop of the scan, the recognized text, a confidence score, and what
+to do with it:
+
+| Mode | Result |
+|---|---|
+| `trace` (default) | the faithful centerline trace of the original lettering |
+| `hershey` | a single-stroke Hershey rendering of the text, fitted to the region |
+| `hide` | the region is left out of the view and the export |
+
+Press **Run OCR** to recognize every region (Tesseract; pick the language, e.g.
+`deu` for the German sheets). Recognition never changes what is drawn — it only
+fills in the text, so you can read and correct it first. Text cells are editable
+and re-render immediately. **Hershey if confident** switches the regions above
+75 % confidence, leaving the rest traced; low-confidence rows are tinted so review
+lands where the recognizer was least sure.
+
+Why Hershey: these fonts are defined as pen strokes rather than filled outlines, so
+a plotter draws each glyph in a single pass. A centerline trace of 2 px lettering is
+always a wobbly approximation; a Hershey glyph is exactly what a pen can draw.
+
+Nothing is destructive. Hidden and Hershey-substituted regions keep their traced
+strokes in the document and are only skipped when drawing and exporting, so
+switching a region back to `trace` restores it exactly. Text and region decisions
+also survive a re-trace and a project round-trip.
+
+**Requires**: `uv pip install -e '.[ocr]'` plus the Tesseract program and language
+data (Arch: `sudo pacman -S tesseract tesseract-data-eng tesseract-data-deu`).
+Without them the panel still works for detection, hiding and manual text entry.
+
+Expect handwriting, symbols (⌀ ± ° ▽) and ink-damaged labels to stay traced — that
+is the intended outcome, not a failure. A misread dimension looks authoritative in
+a way a wobbly trace does not, which is why every region starts at `trace` and
+Hershey is always opt-in.
 
 The canvas displays the *preprocessed* page rather than the raw scan, because
 deskew and preview downscaling mean only that frame shares coordinates with the
@@ -277,18 +318,17 @@ accident:
 
 ## Roadmap
 
-Done: headless core, plotter optimization, GUI shell, vector editing.
+Done: headless core, plotter optimization, GUI shell, vector editing, and the
+text layer (detection, OCR, Hershey substitution).
 
 Next up:
 
-1. **Text layer (optional).** Detect text regions first — that alone allows a
-   separate layer and *region-specific parameters*, which is the real fix for
-   sheets mixing 2 px lettering with 80 px solid fills. Then, opt-in, OCR those
-   regions and keep the strings as metadata **alongside** the traced strokes, and
-   optionally substitute a Hershey single-stroke font for regions you approve.
-   Never silently: a misread `3,2±0,05` looks authoritative in a way a wobbly
-   trace does not.
-2. **Polish** — parameter presets, perspective correction for photos, packaging,
+1. **Region-specific tracing parameters.** Now that text regions are known, they
+   can be binarized differently from the surrounding line-work — the real fix for
+   sheets mixing 2 px lettering with 80 px solid fills.
+2. **Better text grouping** — merge the lines of a multi-line label into one block
+   so it can be reviewed and re-rendered as a unit.
+3. **Polish** — parameter presets, perspective correction for photos, packaging,
    batch mode in the GUI.
 
 ## Known risks and handling
