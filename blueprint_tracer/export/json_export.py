@@ -6,6 +6,8 @@ import json
 import os
 from typing import Optional
 
+import numpy as np
+
 from blueprint_tracer.core.pipeline import TraceResult
 
 
@@ -18,6 +20,10 @@ def to_json(result: TraceResult, image_name: Optional[str] = None, round_to: int
         "px_per_mm": result.px_per_mm,
         "deskew_angle_deg": round(result.angle, 4),
         "stats": result.stats,
+        "text_regions": [
+            r.to_dict() if hasattr(r, "to_dict") else dict(r)
+            for r in (result.text_regions or [])
+        ],
         "paths": [],
     }
     for p in result.paths:
@@ -29,13 +35,28 @@ def to_json(result: TraceResult, image_name: Optional[str] = None, round_to: int
                 "length_px": round(float(p.length), 3),
                 "closed": bool(p.closed),
                 "plot_order": p.id,
+                "region_id": int(getattr(p, "region_id", -1)),
             }
         )
     return doc
+
+
+def _plain(value):
+    """Coerce numpy scalars/arrays to built-ins.
+
+    OpenCV and numpy return int32/float32 rather than Python numbers, and a single
+    one anywhere in the document makes json.dump fail with an unhelpful
+    "Object of type int32 is not JSON serializable".
+    """
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    raise TypeError(f"not JSON serializable: {type(value).__name__}")
 
 
 def write_json(result: TraceResult, path: str, image_name: Optional[str] = None) -> None:
     if image_name is None:
         image_name = os.path.basename(path)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(to_json(result, image_name=image_name), f, indent=1)
+        json.dump(to_json(result, image_name=image_name), f, indent=1, default=_plain)

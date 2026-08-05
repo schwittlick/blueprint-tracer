@@ -1,5 +1,6 @@
 """Headless GUI tests. Skipped if PySide6 is not installed."""
 
+import json
 import os
 
 import numpy as np
@@ -79,12 +80,13 @@ def test_project_roundtrip(tmp_path):
     target = tmp_path / "p.btproj"
     save_project(str(target), "/some/image.tif", cfg, paths)
 
-    image, loaded_cfg, loaded_paths = load_project(str(target))
+    image, loaded_cfg, loaded_paths, loaded_regions = load_project(str(target))
     assert image.endswith("image.tif")
     assert loaded_cfg.sauvola_k == pytest.approx(0.11)
     assert loaded_cfg.supersample == pytest.approx(2.0)
     assert len(loaded_paths) == len(paths)
     assert np.allclose(loaded_paths[0].points, paths[0].points)
+    assert loaded_regions == []
 
 
 def test_window_traces_and_aligns_overlay(qapp, tmp_path):
@@ -165,6 +167,61 @@ def test_export_writes_svg_json_and_traced_png(qapp, tmp_path):
     assert png.shape == (win.result.height, win.result.width)
     assert (png < 128).any(), "traced PNG contains no ink"
 
+    win.worker.stop()
+    win.close()
+
+
+def test_hiding_text_regions_is_non_destructive(qapp, tmp_path):
+    """Hiding a region must exclude it from view and export without destroying
+    path data, so restoring it brings the strokes back exactly."""
+    import cv2
+    from PySide6.QtWidgets import QFileDialog
+
+    from blueprint_tracer.gui.main_window import MainWindow
+
+    img = np.full((320, 520), 255, dtype=np.uint8)
+    cv2.rectangle(img, (30, 200), (490, 300), 0, 2)
+    cv2.putText(img, "GROOVED CASING", (40, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, 0, 2)
+    src = tmp_path / "sheet.png"
+    cv2.imwrite(str(src), img)
+
+    win = MainWindow()
+    win.params.deskew.setChecked(False)
+    win.load_image(str(src))
+    loop = QEventLoop()
+    win.worker.finished_trace.connect(lambda *_: QTimer.singleShot(50, loop.quit))
+    QTimer.singleShot(30000, loop.quit)
+    loop.exec()
+
+    assert win.text_panel.regions, "no text regions detected"
+    total = len(win.edits.paths)
+    tagged = [p for p in win.edits.paths if p.region_id >= 0]
+    assert tagged, "no path was tagged to a region"
+
+    win.text_panel.set_all("hide")
+    qapp.processEvents()
+    assert len(win.edits.paths) == total, "hiding destroyed path data"
+    assert win.canvas.paths_item.hidden_regions
+
+    base = tmp_path / "hidden"
+    original = QFileDialog.getSaveFileName
+    QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: (str(base) + ".svg", ""))
+    try:
+        win.export()
+        hidden_json = json.loads((tmp_path / "hidden.json").read_text())
+        assert len(hidden_json["paths"]) == total - len(tagged)
+
+        win.text_panel.set_all("trace")
+        qapp.processEvents()
+        base = tmp_path / "restored"
+        QFileDialog.getSaveFileName = staticmethod(
+            lambda *a, **k: (str(base) + ".svg", ""))
+        win.export()
+        restored_json = json.loads((tmp_path / "restored.json").read_text())
+    finally:
+        QFileDialog.getSaveFileName = original
+
+    assert len(restored_json["paths"]) == total, "restoring did not bring paths back"
     win.worker.stop()
     win.close()
 

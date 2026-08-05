@@ -15,6 +15,9 @@ dependencies = [
 [project.optional-dependencies]
 gui = ["PySide6>=6.6"]
 dev = ["pytest>=8.0"]
+# Optional text layer. pytesseract also needs the tesseract binary plus language
+# data (e.g. Arch: tesseract, tesseract-data-eng, tesseract-data-deu).
+ocr = ["pytesseract>=0.3.10", "hershey-fonts>=2.1"]
 
 [project.scripts]
 blueprint-tracer = "blueprint_tracer.cli:main"

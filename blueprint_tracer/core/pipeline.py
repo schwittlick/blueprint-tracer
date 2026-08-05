@@ -15,6 +15,7 @@ from blueprint_tracer.core import optimize as _opt
 from blueprint_tracer.core import preprocess as _preprocess
 from blueprint_tracer.core import skeleton as _skeleton
 from blueprint_tracer.core import solids as _solids
+from blueprint_tracer.core import text as _text
 from blueprint_tracer.core import trace as _trace
 from blueprint_tracer.core.config import Config
 from blueprint_tracer.core.geometry import Path
@@ -38,6 +39,7 @@ class TraceResult:
     angle: float = 0.0
     stats: dict = field(default_factory=dict)
     gray: Optional[np.ndarray] = None  # the preprocessed image the paths align to
+    text_regions: list = field(default_factory=list)
     debug: dict = field(default_factory=dict)  # intermediate images when requested
 
     @property
@@ -71,6 +73,18 @@ def run(
         if solid_mask.any():
             mask = stroke_mask
 
+    regions: list = []
+    if cfg.detect_text:
+        # The mask is in processed pixels, which max_dim may have shrunk relative to
+        # the source the stroke width was measured on. Scale to match, or the glyph
+        # size band is wrong for every preview.
+        px_scale = mask.shape[1] / gray.shape[1] if gray.shape[1] else 1.0
+        regions = _text.detect_text_regions(
+            mask, stroke_width * px_scale,
+            min_glyphs=cfg.text_min_glyphs,
+            max_glyph_height=cfg.text_max_glyph_height,
+        )
+
     skel, dist = _skeleton.skeletonize_mask(mask)
 
     h, w = proc.shape
@@ -101,6 +115,10 @@ def run(
     for i, p in enumerate(paths):
         p.id = i
 
+    # Assign after ordering and joining, so neither can invalidate the mapping.
+    if regions:
+        _text.assign_paths(paths, regions)
+
     stats = {
         "n_paths": len(paths),
         "n_points": int(sum(len(p.points) for p in paths)),
@@ -120,6 +138,7 @@ def run(
         },
         "solid_mode": cfg.solid_mode,
         "n_solid_regions": int(solid_paths),
+        "n_text_regions": len(regions),
         "elapsed_s": time.perf_counter() - t0,
     }
 
@@ -139,6 +158,7 @@ def run(
         angle=angle,
         stats=stats,
         gray=proc,
+        text_regions=regions,
     )
     if debug:
         result.debug = {"gray": proc, "mask": mask, "skeleton": skel}

@@ -53,6 +53,11 @@ class Config:
     solid_mode: str = "outline"      # "outline" | "skeleton" | "ignore"
     solid_min_width: Optional[float] = None  # auto ~= 4x stroke width, min 8 px
 
+    # --- text layer ---
+    detect_text: bool = True         # locate lettering so it can be handled separately
+    text_min_glyphs: int = 2         # a lone mark is not a word
+    text_max_glyph_height: int = 0   # cap on character height in px; 0 = auto
+
     # --- cleanup ---
     despeckle_min_area: Optional[int] = None  # auto ~= half a stroke-square
     close_gaps: int = 0              # morphological close kernel to bridge gaps; 0 = off

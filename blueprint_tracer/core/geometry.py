@@ -20,6 +20,7 @@ class Path:            # move through list/set membership by object identity
     stroke_width: float = 1.0
     closed: bool = False
     id: int = -1
+    region_id: int = -1  # detected text region this stroke belongs to, or -1
 
     def __post_init__(self) -> None:
         self.points = np.asarray(self.points, dtype=np.float32).reshape(-1, 2)
@@ -41,7 +42,8 @@ class Path:            # move through list/set membership by object identity
         return self.points[-1]
 
     def reversed(self) -> "Path":
-        return Path(self.points[::-1].copy(), self.stroke_width, self.closed, self.id)
+        return Path(self.points[::-1].copy(), self.stroke_width, self.closed,
+                    self.id, self.region_id)
 
 
 def polyline_length(points: np.ndarray) -> float:

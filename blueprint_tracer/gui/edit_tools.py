@@ -114,7 +114,11 @@ class EditState:
             if float(np.hypot(*(first[-1] - second[0]))) <= 1e-3:
                 second = second[1:]
             pts = np.vstack([first, second])
-            merged = Path(points=pts, stroke_width=merged.stroke_width)
+            # Keep the region only while every part agrees, so a merged stroke
+            # cannot smuggle unrelated geometry into a hidden text region.
+            region = merged.region_id if merged.region_id == cand.region_id else -1
+            merged = Path(points=pts, stroke_width=merged.stroke_width,
+                          region_id=region)
 
         for _, p in removed:
             self.paths.remove(p)
@@ -128,8 +132,10 @@ class EditState:
         p = self.paths[index]
         if not (0 < point_index < len(p.points) - 1):
             return "pick an interior node to split at"
-        a = Path(points=p.points[: point_index + 1].copy(), stroke_width=p.stroke_width)
-        b = Path(points=p.points[point_index:].copy(), stroke_width=p.stroke_width)
+        a = Path(points=p.points[: point_index + 1].copy(),
+                 stroke_width=p.stroke_width, region_id=p.region_id)
+        b = Path(points=p.points[point_index:].copy(),
+                 stroke_width=p.stroke_width, region_id=p.region_id)
         removed = [(index, p)]
         self.paths.remove(p)
         self.paths.extend([a, b])
@@ -150,6 +156,7 @@ class EditState:
             added.append(Path(
                 points=np.vstack([p.points[0], p.points[-1]]),
                 stroke_width=p.stroke_width,
+                region_id=p.region_id,
             ))
         if not removed:
             return "nothing to straighten"

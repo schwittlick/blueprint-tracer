@@ -33,10 +33,40 @@ from blueprint_tracer.gui.canvas import Canvas
 from blueprint_tracer.gui.edit_tools import EditState
 from blueprint_tracer.gui.params_panel import ParamsPanel
 from blueprint_tracer.gui.project import load_project, save_project
-from blueprint_tracer.gui.worker import TraceWorker
+from blueprint_tracer.core import hershey, ocr
+from blueprint_tracer.gui.text_panel import TextPanel
+from blueprint_tracer.gui.worker import OcrWorker, TraceWorker
 
 PREVIEW_MAX_DIM = 1600
 DEBOUNCE_MS = 250
+
+
+def _carry_over_decisions(old_regions: list, new_regions: list) -> None:
+    """Copy review decisions from a previous detection onto a fresh one.
+
+    Re-tracing rebuilds the regions from scratch, so without this every parameter
+    tweak would quietly reset the text, confidence and mode the user had settled on.
+    Regions are matched by overlapping position, which survives small shifts.
+    """
+    reviewed = [r for r in old_regions if r.mode != "trace" or r.text]
+    if not reviewed or not new_regions:
+        return
+    for fresh in new_regions:
+        best, best_score = None, 0.0
+        for old in reviewed:
+            ix = max(0, min(fresh.x + fresh.width, old.x + old.width) - max(fresh.x, old.x))
+            iy = max(0, min(fresh.y + fresh.height, old.y + old.height) - max(fresh.y, old.y))
+            inter = ix * iy
+            if not inter:
+                continue
+            score = inter / float(min(fresh.width * fresh.height,
+                                      old.width * old.height) or 1)
+            if score > best_score:
+                best, best_score = old, score
+        if best is not None and best_score > 0.6:
+            fresh.text = best.text
+            fresh.confidence = best.confidence
+            fresh.mode = best.mode
 
 
 class MainWindow(QMainWindow):
@@ -51,6 +81,8 @@ class MainWindow(QMainWindow):
         self.result: Optional[TraceResult] = None
         self.edits = EditState()
         self.dirty_edits = False
+        self.text_paths: list = []   # Hershey lettering standing in for regions
+        self._pending_restore = None  # project work waiting for its trace to land
 
         # Left view shows the scan alone, the main view carries the vectors. In
         # side-by-side mode neither view holds the other's layer, so the heavy
@@ -80,6 +112,22 @@ class MainWindow(QMainWindow):
         dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
         self.params_dock = dock
+
+        self.text_panel = TextPanel()
+        text_dock = QDockWidget("Text regions", self)
+        text_dock.setWidget(self.text_panel)
+        text_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.addDockWidget(Qt.RightDockWidgetArea, text_dock)
+        self.text_dock = text_dock
+        self.tabifyDockWidget(dock, text_dock)
+        dock.raise_()
+
+        self.text_panel.region_selected.connect(self._focus_region)
+        self.text_panel.modes_changed.connect(self._apply_region_modes)
+        self.text_panel.text_edited.connect(lambda _id: self._apply_region_modes())
+        self.text_panel.ocr_requested.connect(self.run_ocr)
+        self.text_panel.set_languages(ocr.available_languages())
+        self.ocr_worker: Optional[OcrWorker] = None
 
         self.worker = TraceWorker(self)
         self.worker.finished_trace.connect(self._on_traced)
@@ -170,7 +218,10 @@ class MainWindow(QMainWindow):
         self.chk_vectors.toggled.connect(self.canvas.set_vectors_visible)
         self.chk_nodes = QCheckBox("Nodes")
         self.chk_nodes.toggled.connect(self._toggle_node_mode)
-        for w in (self.chk_image, self.chk_vectors, self.chk_nodes):
+        self.chk_text = QCheckBox("Text boxes")
+        self.chk_text.setToolTip("Outline the detected lettering regions")
+        self.chk_text.toggled.connect(self._toggle_text_boxes)
+        for w in (self.chk_image, self.chk_vectors, self.chk_nodes, self.chk_text):
             tb.addWidget(w)
 
         tb.addSeparator()
@@ -206,6 +257,26 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self.fit_views)
         else:
             self.fit_views()
+
+    def _apply_restore(self) -> None:
+        """Put a loaded project's geometry and review decisions in place.
+
+        Called after the trace it must override has landed, never before.
+        """
+        if self._pending_restore is None:
+            return
+        paths, regions = self._pending_restore
+        self._pending_restore = None
+        self.edits.set_paths(paths)
+        if regions and self.result is not None:
+            self.result.text_regions = regions
+            self.canvas.set_regions(regions, self.result.width, self.result.height)
+            self.text_panel.set_regions(regions, self.result.gray)
+        self._show_paths()
+        self._apply_region_modes()
+        self.statusBar().showMessage(
+            f"restored {len(paths)} edited path(s) and {len(regions)} text region(s)",
+            6000)
 
     def _refresh_source_view(self) -> None:
         """Give the left pane the same page the vectors were traced from."""
@@ -263,18 +334,18 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            image_path, cfg, paths = load_project(path)
+            image_path, cfg, paths, regions = load_project(path)
         except Exception as exc:
             QMessageBox.critical(self, "Could not open project", str(exc))
             return
         self.params.from_config(cfg)
+        # load_image queues a background trace; applying the saved work now would be
+        # overwritten the moment that trace lands. Stash it and let _on_traced apply it.
+        self._pending_restore = (paths, regions) if paths else None
         if image_path and os.path.exists(image_path):
             self.load_image(image_path)
-        if paths:
-            # Restore hand-edited geometry instead of the freshly traced result.
-            self.edits.set_paths(paths)
-            self._show_paths()
-            self.statusBar().showMessage(f"restored {len(paths)} edited paths", 5000)
+        elif paths:
+            self._apply_restore()
 
     def save_project_as(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -284,7 +355,8 @@ class MainWindow(QMainWindow):
         if not os.path.splitext(path)[1]:
             path += ".btproj"
         try:
-            save_project(path, self.image_path, self.params.to_config(), self.edits.paths)
+            save_project(path, self.image_path, self.params.to_config(),
+                         self.edits.paths, self.text_panel.regions)
         except Exception as exc:
             QMessageBox.critical(self, "Could not save project", str(exc))
             return
@@ -301,10 +373,15 @@ class MainWindow(QMainWindow):
             return
         base = os.path.splitext(base)[0]
 
-        # Export exactly what is on screen, including manual edits.
+        # Export exactly what is on screen: manual edits included, hidden regions
+        # left out, and Hershey lettering standing in where it was chosen.
+        hidden = self.text_panel.hidden_region_ids()
+        visible = [p for p in self.edits.paths if p.region_id not in hidden]
+        visible = visible + list(getattr(self, "text_paths", []))
         out = TraceResult(
-            paths=self.edits.paths, width=self.result.width, height=self.result.height,
+            paths=visible, width=self.result.width, height=self.result.height,
             dpi=self.result.dpi, angle=self.result.angle, stats=dict(self.result.stats),
+            text_regions=self.result.text_regions,
         )
         for i, p in enumerate(out.paths):
             p.id = i
@@ -366,7 +443,15 @@ class MainWindow(QMainWindow):
             self._refresh_source_view()
             if first:
                 self.fit_views()
+        # A re-trace produces brand new regions; carry the review decisions over so
+        # nudging a parameter does not silently discard them.
+        _carry_over_decisions(self.text_panel.regions, result.text_regions)
         self._show_paths()
+        self.canvas.set_regions(result.text_regions, result.width, result.height)
+        self.text_panel.set_regions(result.text_regions, result.gray)
+        if self._pending_restore is not None:
+            self._apply_restore()
+        self._apply_region_modes()
         self.params.show_resolved(result.stats)
 
         s = result.stats
@@ -398,6 +483,86 @@ class MainWindow(QMainWindow):
         self._update_selection_status()
 
     # --- editing ---
+
+    def _toggle_text_boxes(self, on: bool) -> None:
+        self.canvas.set_regions_visible(on)
+        if on:
+            self.text_dock.raise_()
+
+    def _focus_region(self, region_id: int) -> None:
+        for region in self.result.text_regions if self.result else []:
+            if region.id == region_id:
+                self.canvas.regions_item.highlight = region_id
+                self.canvas.set_regions_visible(True)
+                self.chk_text.setChecked(True)
+                self.canvas.focus_rect(region.x, region.y, region.width, region.height)
+                if self.source_canvas.isVisible():
+                    self._sync_views(self.canvas, self.source_canvas)
+                return
+
+    def run_ocr(self, lang: str) -> None:
+        """Recognize every detected region, leaving all of them still traced.
+
+        Reading the text never changes what is drawn; switching a region to
+        hershey is a separate, per-region decision.
+        """
+        if self.result is None or not self.text_panel.regions:
+            self.statusBar().showMessage("no text regions to recognize", 3000)
+            return
+        if self.ocr_worker is not None and self.ocr_worker.isRunning():
+            return
+        try:
+            ocr.check_ready(lang)
+        except ocr.OcrUnavailable as exc:
+            QMessageBox.warning(self, "OCR unavailable", str(exc))
+            return
+
+        self.text_panel.btn_ocr.setEnabled(False)
+        self.ocr_worker = OcrWorker(self.result.gray, self.text_panel.regions, lang, self)
+        self.ocr_worker.progress.connect(
+            lambda done, total: self.statusBar().showMessage(
+                f"recognizing… {done}/{total}"))
+        self.ocr_worker.failed.connect(self._on_ocr_failed)
+        self.ocr_worker.finished_ocr.connect(self._on_ocr_done)
+        self.ocr_worker.start()
+
+    def _on_ocr_done(self, found: int) -> None:
+        self.text_panel.btn_ocr.setEnabled(True)
+        self.text_panel.refresh_results()
+        self._apply_region_modes()
+        total = len(self.text_panel.regions)
+        self.statusBar().showMessage(
+            f"recognized {found} of {total} region(s) — review the text, then switch "
+            f"regions to hershey", 8000)
+
+    def _on_ocr_failed(self, message: str) -> None:
+        self.text_panel.btn_ocr.setEnabled(True)
+        self.statusBar().clearMessage()
+        QMessageBox.warning(self, "OCR failed", message)
+
+    def _apply_region_modes(self) -> None:
+        """Recompose what is drawn from the region decisions.
+
+        Traced strokes are never destroyed: a hidden or Hershey-substituted region
+        is only skipped at paint and export time, so switching back restores it.
+        """
+        hidden = self.text_panel.hidden_region_ids()
+        self.canvas.paths_item.hidden_regions = hidden
+        self.canvas.paths_item.update()
+
+        text_paths: list = []
+        for region in self.text_panel.hershey_regions():
+            text_paths.extend(hershey.render_region(region))
+        self.text_paths = text_paths
+        self.canvas.set_text_paths(text_paths, self.canvas.paths_item._rect.width(),
+                                  self.canvas.paths_item._rect.height())
+        self.canvas.regions_item.update()
+
+        replaced = sum(1 for p in self.edits.paths if p.region_id in hidden)
+        n_hershey = len(self.text_panel.hershey_regions())
+        self.statusBar().showMessage(
+            f"{n_hershey} region(s) as hershey text · {replaced} traced path(s) "
+            f"replaced or hidden", 4000)
 
     def _toggle_node_mode(self, on: bool) -> None:
         self.canvas.mode = "node" if on else "select"

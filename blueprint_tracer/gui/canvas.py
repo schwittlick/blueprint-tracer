@@ -45,9 +45,14 @@ class PathsItem(QGraphicsItem):
         self.paths: list[Path] = []
         self.selected: set[int] = set()
         self.show_nodes = False
+        self.hidden_regions: set[int] = set()
         self._rect = QRectF(0, 0, 1, 1)
         self._cache: list[QPainterPath] = []
         self.setZValue(10)
+
+    def is_hidden(self, index: int) -> bool:
+        return (0 <= index < len(self.paths)
+                and self.paths[index].region_id in self.hidden_regions)
 
     def set_paths(self, paths: list[Path], width: int, height: int) -> None:
         self.prepareGeometryChange()
@@ -82,7 +87,7 @@ class PathsItem(QGraphicsItem):
         pen.setWidthF(1.0)
         painter.setPen(pen)
         for i, qp in enumerate(self._cache):
-            if i in self.selected:
+            if i in self.selected or self.is_hidden(i):
                 continue
             painter.drawPath(qp)
 
@@ -92,7 +97,7 @@ class PathsItem(QGraphicsItem):
             sel.setWidthF(2.0)
             painter.setPen(sel)
             for i in self.selected:
-                if 0 <= i < len(self._cache):
+                if 0 <= i < len(self._cache) and not self.is_hidden(i):
                     painter.drawPath(self._cache[i])
 
         if self.show_nodes and self.selected and lod > 0.15:
@@ -100,10 +105,48 @@ class PathsItem(QGraphicsItem):
             painter.setPen(QPen(NODE_EDGE, 0))
             painter.setBrush(NODE)
             for i in self.selected:
-                if not (0 <= i < len(self.paths)):
+                if not (0 <= i < len(self.paths)) or self.is_hidden(i):
                     continue
                 for x, y in self.paths[i].points:
                     painter.drawEllipse(QPointF(float(x), float(y)), r, r)
+
+
+class TextRegionsItem(QGraphicsItem):
+    """Boxes around detected lettering, coloured by the treatment chosen for each."""
+
+    COLORS = {
+        "trace": QColor("#7a7a75"),
+        "hide": QColor("#c26a1c"),
+        "hershey": QColor("#1c8a3e"),
+    }
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.regions: list = []
+        self.highlight: int = -1
+        self._rect = QRectF(0, 0, 1, 1)
+        self.setZValue(20)
+
+    def set_regions(self, regions: list, width: int, height: int) -> None:
+        self.prepareGeometryChange()
+        self.regions = regions
+        self._rect = QRectF(0, 0, max(1, width), max(1, height))
+        self.update()
+
+    def boundingRect(self) -> QRectF:  # noqa: N802
+        return self._rect
+
+    def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: N802
+        for region in self.regions:
+            color = self.COLORS.get(region.mode, self.COLORS["trace"])
+            pen = QPen(color)
+            pen.setCosmetic(True)
+            pen.setWidthF(2.5 if region.id == self.highlight else 1.0)
+            if region.id == self.highlight:
+                pen.setColor(QColor("#e2231a"))
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(QRectF(region.x, region.y, region.width, region.height))
 
 
 class Canvas(QGraphicsView):
@@ -129,6 +172,14 @@ class Canvas(QGraphicsView):
         self._scene.addItem(self.image_item)
         self.paths_item = PathsItem()
         self._scene.addItem(self.paths_item)
+        # Hershey lettering that stands in for traced text, kept in its own item so
+        # it never disturbs selection indices in the traced set.
+        self.text_item = PathsItem()
+        self.text_item.setZValue(11)
+        self._scene.addItem(self.text_item)
+        self.regions_item = TextRegionsItem()
+        self.regions_item.setVisible(False)
+        self._scene.addItem(self.regions_item)
 
         self.mode = "select"          # select | node | pan
         self._panning = False
@@ -179,6 +230,27 @@ class Canvas(QGraphicsView):
 
     def set_vectors_visible(self, visible: bool) -> None:
         self.paths_item.setVisible(visible)
+
+    def set_text_paths(self, paths: list[Path], width: float, height: float) -> None:
+        self.text_item.set_paths(paths, int(width) or 1, int(height) or 1)
+
+    def set_regions(self, regions: list, width: int, height: int) -> None:
+        self.regions_item.set_regions(regions, width, height)
+
+    def set_regions_visible(self, visible: bool) -> None:
+        self.regions_item.setVisible(visible)
+
+    def focus_rect(self, x: float, y: float, w: float, h: float, margin: float = 40.0) -> None:
+        """Centre a region in the view without zooming further than is readable."""
+        self.fitInView(
+            QRectF(x - margin, y - margin, w + 2 * margin, h + 2 * margin),
+            Qt.KeepAspectRatio,
+        )
+        if self.transform().m11() > 8.0:
+            self.resetTransform()
+            self.scale(8.0, 8.0)
+            self.centerOn(x + w / 2.0, y + h / 2.0)
+        self.viewport_changed.emit()
 
     def fit(self) -> None:
         rect = self._scene.sceneRect()
@@ -290,8 +362,8 @@ class Canvas(QGraphicsView):
         best, best_d = None, tol
         for i, p in enumerate(self.paths_item.paths):
             pts = p.points
-            if len(pts) == 0:
-                continue
+            if len(pts) == 0 or self.paths_item.is_hidden(i):
+                continue  # never select what is not drawn
             # Cheap bbox reject before the per-segment distance test.
             if (pts[:, 0].min() - tol > target[0] or pts[:, 0].max() + tol < target[0]
                     or pts[:, 1].min() - tol > target[1] or pts[:, 1].max() + tol < target[1]):
@@ -331,8 +403,8 @@ class Canvas(QGraphicsView):
         x0, y0, x1, y1 = rect.left(), rect.top(), rect.right(), rect.bottom()
         for i, p in enumerate(self.paths_item.paths):
             pts = p.points
-            if len(pts) == 0:
-                continue
+            if len(pts) == 0 or self.paths_item.is_hidden(i):
+                continue  # never select what is not drawn
             inside = ((pts[:, 0] >= x0) & (pts[:, 0] <= x1)
                       & (pts[:, 1] >= y0) & (pts[:, 1] <= y1))
             if inside.any():
