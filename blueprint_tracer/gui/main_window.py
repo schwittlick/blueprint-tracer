@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+import cv2
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence
@@ -26,6 +27,7 @@ from blueprint_tracer.core.config import Config
 from blueprint_tracer.core.io_utils import load_gray
 from blueprint_tracer.core.pipeline import TraceResult
 from blueprint_tracer.export.json_export import write_json
+from blueprint_tracer.export.render import render_paths
 from blueprint_tracer.export.svg import write_svg
 from blueprint_tracer.gui.canvas import Canvas
 from blueprint_tracer.gui.edit_tools import EditState
@@ -111,7 +113,7 @@ class MainWindow(QMainWindow):
         self.act_open_project.triggered.connect(self.open_project)
         self.act_save_project = QAction("&Save project…", self, shortcut=QKeySequence.Save)
         self.act_save_project.triggered.connect(self.save_project_as)
-        self.act_export = QAction("&Export SVG + JSON…", self)
+        self.act_export = QAction("&Export SVG + JSON + PNG…", self)
         self.act_export.setShortcut("Ctrl+E")
         self.act_export.triggered.connect(self.export)
         self.act_quit = QAction("&Quit", self, shortcut=QKeySequence.Quit)
@@ -293,8 +295,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Nothing to export", "Trace an image first.")
             return
         base, _ = QFileDialog.getSaveFileName(
-            self, "Export SVG + JSON", os.path.splitext(self.image_path)[0],
-            "SVG (*.svg);;All files (*)")
+            self, "Export SVG + JSON + traced PNG",
+            os.path.splitext(self.image_path)[0], "SVG (*.svg);;All files (*)")
         if not base:
             return
         base = os.path.splitext(base)[0]
@@ -311,11 +313,13 @@ class MainWindow(QMainWindow):
         try:
             write_svg(out, base + ".svg")
             write_json(out, base + ".json", image_name=os.path.basename(self.image_path))
+            cv2.imwrite(base + "_trace.png", render_paths(out))
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
             return
         self.statusBar().showMessage(
-            f"exported {os.path.basename(base)}.svg and .json ({len(out.paths)} paths)", 6000)
+            f"exported {os.path.basename(base)} .svg / .json / _trace.png "
+            f"({len(out.paths)} paths)", 6000)
 
     # --- tracing ---
 

@@ -129,6 +129,46 @@ def test_window_traces_and_aligns_overlay(qapp, tmp_path):
     win.close()
 
 
+def test_export_writes_svg_json_and_traced_png(qapp, tmp_path):
+    import cv2
+    from PySide6.QtWidgets import QFileDialog
+
+    from blueprint_tracer.gui.main_window import MainWindow
+
+    img = np.full((200, 260), 255, dtype=np.uint8)
+    cv2.rectangle(img, (40, 40), (220, 160), 0, 2)
+    src = tmp_path / "sheet.png"
+    cv2.imwrite(str(src), img)
+
+    win = MainWindow()
+    win.params.deskew.setChecked(False)
+    win.load_image(str(src))
+    loop = QEventLoop()
+    win.worker.finished_trace.connect(lambda *_: QTimer.singleShot(50, loop.quit))
+    QTimer.singleShot(30000, loop.quit)
+    loop.exec()
+
+    base = tmp_path / "out"
+    original = QFileDialog.getSaveFileName
+    QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: (str(base) + ".svg", ""))
+    try:
+        win.export()
+    finally:
+        QFileDialog.getSaveFileName = original
+
+    assert (tmp_path / "out.svg").exists()
+    assert (tmp_path / "out.json").exists()
+    png_path = tmp_path / "out_trace.png"
+    assert png_path.exists(), "traced PNG was not written"
+
+    png = cv2.imread(str(png_path), cv2.IMREAD_GRAYSCALE)
+    assert png.shape == (win.result.height, win.result.width)
+    assert (png < 128).any(), "traced PNG contains no ink"
+
+    win.worker.stop()
+    win.close()
+
+
 def test_side_by_side_splits_layers_and_syncs_views(qapp, tmp_path):
     """Scan and trace get one layer each, and the two panes stay locked together."""
     import cv2
