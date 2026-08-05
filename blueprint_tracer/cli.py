@@ -39,6 +39,9 @@ def build_config(args: argparse.Namespace) -> Config:
     cfg.despeckle_min_area = args.despeckle
     cfg.close_gaps = args.close_gaps
     cfg.remove_border = args.remove_border
+    cfg.fill_solid = not args.no_fill_solid
+    cfg.solid_mode = args.solid_mode
+    cfg.solid_min_width = args.solid_min_width
     cfg.deskew = not args.no_deskew
     cfg.flatfield = not args.no_flatfield
     cfg.join_paths = not args.no_join
@@ -98,6 +101,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--despeckle", type=int, default=None, help="min component area px (default: auto)")
     ap.add_argument("--close-gaps", type=int, default=0, help="gap-closing kernel (px, 0=off)")
     ap.add_argument("--remove-border", action="store_true", help="strip edge-touching scan cruft")
+    ap.add_argument("--solid-mode", default="outline", choices=["outline", "skeleton", "ignore"],
+                    help="filled shapes: trace their outline (default), skeletonize them "
+                         "into a medial axis, or drop them entirely")
+    ap.add_argument("--solid-min-width", type=float, default=None,
+                    help="ink this wide counts as solid, not a stroke (default: auto)")
+    ap.add_argument("--no-fill-solid", action="store_true",
+                    help="do not restore interiors of ink wider than the threshold window")
     ap.add_argument("--dpi", type=float, default=None)
     ap.add_argument("--angle", type=float, default=None, help="manual deskew angle (deg)")
     ap.add_argument("--no-deskew", action="store_true")

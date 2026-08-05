@@ -33,10 +33,39 @@ text, and title blocks — used as the working test set.
 
 ## Status
 
-**Milestone 1 (headless core + CLI) — built and working.** Traces all three
-`data/` samples faithfully (geometry, hatching, dimension lines, text, title
+**Milestones 1–4 built and working: headless core, CLI, and the GUI.** Traces
+the `data/` samples faithfully (geometry, hatching, dimension lines, text, title
 blocks) into SVG + JSON. Full resolution 15.5 MP (MT-1.03, 3307×4675) runs in
-~4 s; plot-ordering cuts pen-up travel by ~99 %. Next: GUI (Milestones 3–4).
+~4 s; plot-ordering cuts pen-up travel by ~99 %. Next: optional OCR / text
+layer (see [Roadmap](#roadmap)).
+
+### The GUI
+
+```bash
+uv run blueprint-tracer-gui                 # or pass an image to open it directly
+uv run blueprint-tracer-gui data/MT-1.02.tif
+```
+
+- **Live preview** — every parameter change re-traces on a background thread
+  (debounced, downscaled to 1600 px). `Ctrl+R` re-traces at full resolution.
+- **Auto parameters** — fields marked *Auto* are derived from the measured stroke
+  width and shown greyed; untick to pin your own value.
+- **Canvas** — scroll to zoom, middle-drag to pan, `Ctrl+0` to fit.
+- **Side by side** (`Ctrl+B`) — the scan and the trace in two panes whose zoom and
+  scroll stay locked together, so you can compare a detail at any magnification.
+  In the single-pane view the *Image* and *Vectors* toggles overlay the two
+  instead.
+- **Editing** — click or rubber-band to select (shift extends), then *Delete*,
+  *Join* (`J`), or *Straighten* (`T`). Tick *Nodes* to drag individual vertices.
+  Full undo/redo (`Ctrl+Z` / `Ctrl+Shift+Z`).
+- **Projects** — save the image reference, parameters *and* your manual edits to
+  a `.btproj` so a session is resumable; re-tracing warns before discarding edits.
+- **Export** — `Ctrl+E` writes the SVG and JSON exactly as shown, edits included.
+
+The canvas displays the *preprocessed* page rather than the raw scan, because
+deskew and preview downscaling mean only that frame shares coordinates with the
+traced paths. `TraceResult` geometry is likewise in processed pixels, with `dpi`
+rescaled to match so millimetre values stay correct.
 
 ### Quickstart (with [uv](https://docs.astral.sh/uv/))
 
@@ -63,10 +92,23 @@ runs are instant.
 **Useful flags:** `--max-dim N` (downscale for speed), `--supersample 2` (upscale
 before tracing; recovers small text on low-resolution scans), `--method
 sauvola|adaptive|otsu`, `--sauvola-k` (lower keeps faint strokes solid),
-`--rdp` / `--spur` / `--despeckle` (auto by default — pass a value to pin it),
-`--no-auto-scale`, `--no-deskew`, `--no-order`, `--angle DEG` (manual deskew),
-`--debug` (dump the gray/mask/skeleton images). Full list:
+`--solid-mode outline|skeleton|ignore` (see below),
+`--rdp` / `--spur` / `--despeckle` / `--solid-min-width` (auto by default — pass a
+value to pin it), `--no-auto-scale`, `--no-deskew`, `--no-order`, `--angle DEG`
+(manual deskew), `--debug` (dump the gray/mask/skeleton images). Full list:
 `uv run blueprint-tracer --help`.
+
+### Solid shapes are outlined, not skeletonized
+
+A filled shape — an arrowhead, a blacked-out label, an ink blot — has no
+meaningful centerline. Skeletonizing one yields its *medial axis*: a branching
+squiggle that looks nothing like the shape. Ink wider than `solid_min_width`
+(auto: 4× the stroke width, and never more than 5 % of the page) is therefore
+split off and its boundary traced instead, while the surrounding line-work is
+still centerlined — an arrow keeps a centerlined shaft and an outlined head.
+
+`--solid-mode` picks the treatment: `outline` (default), `skeleton` (the medial
+axis), or `ignore` (drop filled areas entirely, handy for blots and stains).
 
 ### Parameters scale to the drawing
 
@@ -116,6 +158,10 @@ document lines), with adaptive-Gaussian and Otsu fallbacks. → binary ink mask.
 optional gap-closing morphology (off by default, so nearby lines don't merge),
 optional black scan-border removal.
 
+**3b. Split off solid regions** — a morphological opening finds ink that a disk of
+`solid_min_width / 2` fits inside: empty for a stroke, near-complete for a blob.
+Those areas are contoured (`cv2.findContours`) rather than skeletonized.
+
 **4. Skeletonize (centerline)** — `skimage` skeletonize → 1-px centerlines;
 `medial_axis` distance transform gives per-pixel stroke radius → **stroke width
 per path** for the JSON/SVG.
@@ -158,65 +204,94 @@ corners preserved (tunable epsilon).
 
 ## Tech stack
 
-Python 3.11+ · **PySide6** (Qt GUI) · **OpenCV** + **NumPy** + **scikit-image**
-(imaging/skeleton) · **SciPy** (distance transform, KDTree) · **sknw**
-(skeleton graph) · **Pillow** (TIFF/RGBA I/O). Optional **Shapely** for geometry
-ops. Packaged with `pyproject.toml`.
+Python 3.10+ (the repo pins 3.12) · **PySide6** (Qt GUI) · **OpenCV** + **NumPy**
++ **scikit-image** (imaging/skeleton) · **SciPy** (distance transform, KDTree) ·
+**Pillow** (TIFF/RGBA I/O). Packaged with `pyproject.toml`.
+
+`sknw` was dropped for the skeleton graph — it pins a `numba` too old to build on
+modern Python — so `core/trace.py` walks the skeleton itself. That turned out to
+be worth it: it also let the walker cluster junction pixels, which 8-connectivity
+otherwise splinters into a spray of micro-edges.
 
 ## Module layout
 
 ```
 blueprint_tracer/
   core/
-    io.py           load images/DPI, write SVG+JSON
-    preprocess.py   polarity, flat-field, deskew
-    binarize.py     sauvola / adaptive / otsu
-    cleanup.py      despeckle, border, morphology
+    io_utils.py     load images/DPI (RGBA/palette flattening)
+    analyze.py      stroke-width estimate that auto-scales the parameters
+    config.py       Config dataclass + resolve() for auto-scaled values
+    preprocess.py   polarity, flat-field, deskew, supersample
+    binarize.py     sauvola / adaptive / otsu + solid-ink fill
+    cleanup.py      despeckle, border removal, morphology
     skeleton.py     skeletonize + medial-axis width
-    trace.py        skeleton graph → polylines, spur prune
-    simplify.py     RDP
-    optimize.py     join + plot-order
-    geometry.py     Path/Polyline types
-    pipeline.py     stage orchestration + Config dataclass
+    trace.py        skeleton graph → polylines (junction clustering)
+    simplify.py     RDP (closed-aware)
+    optimize.py     spur prune, join, plot-order
+    geometry.py     Path type
+    pipeline.py     stage orchestration
+  export/
+    svg.py  json_export.py  render.py
   gui/
-    main_window.py  canvas.py  params_panel.py
-    edit_tools.py   worker.py  project.py
-  tests/
-  pyproject.toml
+    app.py          entry point
+    main_window.py  menus, actions, export, project handling
+    canvas.py       zoomable image + vector overlay, hit-testing
+    params_panel.py parameter dock with Auto fields
+    edit_tools.py   edit operations + delta-based undo stack
+    worker.py       background tracing thread
+    project.py      .btproj save/load
+  cli.py
+tests/
 ```
 
 The `core` library is fully headless (a thin CLI runs it on `data/` for
 testing), so the algorithm is provable before any UI exists, and a batch CLI
 stays possible later.
 
-## GUI design
+## Notes on the implementation
 
-- **Canvas** (`QGraphicsView`): source layer + vector overlay, pan/zoom,
-  layer toggle, overlay or side-by-side.
-- **Parameters dock**: grouped controls (Preprocess / Binarize / Skeleton /
-  Simplify / Plot). Every change re-runs the pipeline on a **downscaled
-  preview** on a worker thread (debounced); full resolution only on export.
-- **Editing tools**: select, delete, join, split, straighten (line-fit),
-  node edit (drag/insert/delete vertices), reverse. Undo/redo stack.
-- **Status**: path count, point count, estimated pen-up travel, timing.
-- **Project files**: save/load image path + parameters + manual edits so work
-  is resumable.
+A few decisions that are easy to get wrong, recorded so they are not undone by
+accident:
+
+- **Vectors are painted by one `QGraphicsItem`, not one item per path.** A dense
+  sheet is 15 k+ paths and that many scene items makes panning crawl; hit-testing
+  runs against the numpy point arrays instead of the scene index.
+- **Side-by-side gives each pane one layer only** — the scan pane never receives
+  the paths and the trace pane never receives the pixmap, so the expensive path
+  cache and the page bitmap are each built once rather than twice.
+- **Undo stores deltas, not snapshots.** A snapshot of a 15 k-path sheet is
+  megabytes per step.
+- **The threshold window is sized from the stroke width, and solid ink is
+  filled.** Sauvola hollows out any region wider than its window, so filled
+  arrowheads and bars would otherwise come back as ragged accidental outlines —
+  which is a thresholding artifact, not a decision. Filling them makes the
+  `solid_mode` step the one place that decides how filled areas are drawn.
+- **The solid threshold is capped against the page size.** A scan dominated by
+  filled areas drags the stroke-width estimate up toward those areas, and a purely
+  stroke-relative threshold would then classify nothing as solid.
+- **Closed rings are simplified in closed mode.** Running open-mode
+  Douglas–Peucker over a ring drops the closing vertex and leaves a gap that
+  grows with radius.
 
 ---
 
-## Build milestones
+## Roadmap
 
-1. **Headless core** — load → binarize → skeleton → trace → simplify →
-   SVG/JSON, plus a CLI to run on the three `data/` samples and eyeball output.
-   *De-risks the whole project first.*
-2. **Plotter optimization** — join + ordering + stroke-width measurement.
-3. **GUI shell** — canvas, open image, live preview + parameter panel on a
-   worker thread.
-4. **Vector editing** — edit tools, undo, project save/load.
-5. **Polish** — deskew/perspective refinement, parameter presets, packaging;
-   optional batch mode.
+Done: headless core, plotter optimization, GUI shell, vector editing.
 
-## Known risks & handling
+Next up:
+
+1. **Text layer (optional).** Detect text regions first — that alone allows a
+   separate layer and *region-specific parameters*, which is the real fix for
+   sheets mixing 2 px lettering with 80 px solid fills. Then, opt-in, OCR those
+   regions and keep the strings as metadata **alongside** the traced strokes, and
+   optionally substitute a Hershey single-stroke font for regions you approve.
+   Never silently: a misread `3,2±0,05` looks authoritative in a way a wobbly
+   trace does not.
+2. **Polish** — parameter presets, perspective correction for photos, packaging,
+   batch mode in the GUI.
+
+## Known risks and handling
 
 - **Path explosion** from text + cross-hatching (could be tens of thousands of
   paths): spur pruning, min-length filter, RDP, and an aggressiveness preset;
@@ -229,3 +304,7 @@ stays possible later.
 - **Deskew on dense drawings** → robust angle histogram + manual override.
 - **Large scans (4675 px)** → full pipeline off the UI thread; preview
   downsampled.
+- **Damage in the source cannot be recovered.** Where ink has bled into a solid
+  mass, a faithful tracer can only reproduce the mass —
+  `data/plate1_provisional_ira_grenade_mark_7.png` has four such blots sitting on
+  labels. No amount of parameter tuning (or OCR) brings those back.

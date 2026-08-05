@@ -45,7 +45,13 @@ class Config:
     sauvola_k: float = 0.08          # low keeps faint/thin strokes solid; high erodes them
     adaptive_block: Optional[int] = None
     adaptive_c: int = 10
-    fill_solid: bool = True          # union a global Otsu split so wide ink isn't hollowed
+    fill_solid: bool = True          # restore interiors of ink wider than the window
+
+    # --- solid regions ---
+    # Filled shapes (arrowheads, blacked-out labels, ink blots) are described by
+    # their boundary; skeletonizing them yields a meaningless medial-axis squiggle.
+    solid_mode: str = "outline"      # "outline" | "skeleton" | "ignore"
+    solid_min_width: Optional[float] = None  # auto ~= 4x stroke width, min 8 px
 
     # --- cleanup ---
     despeckle_min_area: Optional[int] = None  # auto ~= half a stroke-square
@@ -78,12 +84,16 @@ class Config:
     def field_names(cls) -> list[str]:
         return [f.name for f in fields(cls)]
 
-    def resolve(self, stroke_width: float) -> "Config":
+    def resolve(self, stroke_width: float, image_shape: Optional[tuple] = None) -> "Config":
         """Return a copy with every ``None`` parameter filled in for this stroke width.
 
         Multipliers are chosen so a 4 px stroke reproduces the original hand-tuned
         constants, while a 2 px stroke (small text, low-res scans) gets
         proportionally tighter values instead of being pruned away.
+
+        ``image_shape`` bounds the solid-region threshold against the page: a scan
+        dominated by filled areas inflates the stroke estimate toward those areas,
+        and without the bound nothing would ever be classified as solid.
         """
         c = self.copy()
         w = max(1.0, float(stroke_width))
@@ -93,7 +103,7 @@ class Config:
             defaults = {
                 "sauvola_window": 25, "adaptive_block": 35, "despeckle_min_area": 8,
                 "spur_length": 6.0, "min_path_length": 2.0, "rdp_epsilon": 1.0,
-                "flatfield_size": 25,
+                "flatfield_size": 25, "solid_min_width": 12.0,
             }
             for key, val in defaults.items():
                 if getattr(c, key) is None:
@@ -119,4 +129,12 @@ class Config:
             c.min_path_length = round(0.75 * w, 3)
         if c.rdp_epsilon is None:
             c.rdp_epsilon = round(0.25 * w, 3)
+        if c.solid_min_width is None:
+            # Well clear of bold lettering, which must stay centerlined...
+            value = max(4.0 * w, 8.0)
+            if image_shape:
+                # ...but ink spanning a noticeable share of the page is a filled
+                # area, whatever the stroke estimate says.
+                value = min(value, 0.05 * min(image_shape[0], image_shape[1]))
+            c.solid_min_width = round(max(value, 3.0), 3)
         return c

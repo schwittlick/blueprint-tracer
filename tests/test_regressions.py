@@ -152,6 +152,55 @@ def test_fill_solid_ignores_gray_paper():
     assert mask[100, 75], "real ink lost"
 
 
+def test_solid_region_is_outlined_not_skeletonized():
+    """A filled blob has no meaningful centerline: skeletonizing it produces a
+    branching medial axis that looks nothing like the shape."""
+    img = np.full((240, 300), 250, dtype=np.uint8)
+    cv2.rectangle(img, (70, 90), (230, 150), 20, -1)  # a solid bar, 160 x 60
+
+    outlined = run(img, Config(flatfield=False, deskew=False, solid_mode="outline"))
+    rings = [p for p in outlined.paths if p.closed]
+    assert rings, "solid bar produced no outline"
+    # The outline must hug the bar's edges rather than run down its middle.
+    ring = max(rings, key=lambda p: p.length)
+    on_edge = (np.abs(ring.points[:, 1] - 90) < 6) | (np.abs(ring.points[:, 1] - 150) < 6)
+    assert on_edge.mean() > 0.5, "outline does not follow the bar's boundary"
+
+    skeletonized = run(img, Config(flatfield=False, deskew=False, solid_mode="skeleton"))
+    midline = [
+        p for p in skeletonized.paths
+        if abs(float(p.points[:, 1].mean()) - 120) < 12 and p.length > 40
+    ]
+    assert midline, "precondition: skeleton mode collapses the bar to a medial axis"
+
+
+def test_solid_mode_ignore_drops_blobs_but_keeps_strokes():
+    img = np.full((220, 260), 250, dtype=np.uint8)
+    cv2.circle(img, (60, 110), 40, 20, -1)   # solid blob
+    cv2.line(img, (130, 40), (240, 40), 20, 2)  # thin stroke
+
+    result = run(img, Config(flatfield=False, deskew=False, solid_mode="ignore"))
+    near_blob = [
+        p for p in result.paths
+        if np.hypot(p.points[:, 0] - 60, p.points[:, 1] - 110).mean() < 50
+    ]
+    near_line = [p for p in result.paths if p.points[:, 1].mean() < 60]
+    assert not near_blob, "blob should be dropped in ignore mode"
+    assert near_line, "thin stroke must survive"
+
+
+def test_thin_strokes_are_never_treated_as_solid():
+    """Ordinary line-work and lettering must keep their centerlines."""
+    img = np.full((200, 300), 250, dtype=np.uint8)
+    cv2.line(img, (20, 100), (280, 100), 20, 3)
+    cv2.line(img, (150, 20), (150, 180), 20, 3)
+
+    result = run(img, Config(flatfield=False, deskew=False, solid_mode="outline"))
+    assert result.stats["n_solid_regions"] == 0
+    # A centerlined cross is open paths, not rings.
+    assert not [p for p in result.paths if p.closed]
+
+
 def test_auto_scale_adapts_to_stroke_width():
     thin = Config().resolve(2.0)
     thick = Config().resolve(8.0)

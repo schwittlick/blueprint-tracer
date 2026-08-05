@@ -14,6 +14,7 @@ from blueprint_tracer.core import cleanup as _cleanup
 from blueprint_tracer.core import optimize as _opt
 from blueprint_tracer.core import preprocess as _preprocess
 from blueprint_tracer.core import skeleton as _skeleton
+from blueprint_tracer.core import solids as _solids
 from blueprint_tracer.core import trace as _trace
 from blueprint_tracer.core.config import Config
 from blueprint_tracer.core.geometry import Path
@@ -22,12 +23,21 @@ from blueprint_tracer.core.simplify import simplify_points
 
 @dataclass
 class TraceResult:
+    """Geometry lives in *processed* image space.
+
+    Preprocessing may downscale, supersample and rotate the page, so processed
+    pixels -- not source pixels -- are the only frame in which the paths, the
+    reported ``width``/``height`` and ``gray`` all agree. ``dpi`` is rescaled to
+    match, so physical (mm) measurements stay correct at any internal scale.
+    """
+
     paths: list[Path]
     width: int
     height: int
     dpi: Optional[float] = None
     angle: float = 0.0
     stats: dict = field(default_factory=dict)
+    gray: Optional[np.ndarray] = None  # the preprocessed image the paths align to
     debug: dict = field(default_factory=dict)  # intermediate images when requested
 
     @property
@@ -47,16 +57,31 @@ def run(
     # it first and resolve the config against it (see Config.resolve).
     stroke_width = _analyze.estimate_stroke_width(gray)
     scale = float(cfg.supersample or 1.0)
-    cfg = cfg.resolve(stroke_width * scale)
+    cfg = cfg.resolve(stroke_width * scale, image_shape=gray.shape)
 
     proc, angle = _preprocess.preprocess(gray, cfg)
     mask = _binarize.binarize(proc, cfg)
     mask = _cleanup.cleanup(mask, cfg)
+
+    # Solid shapes are described by their boundary, not a centerline; peel them
+    # off so only genuine strokes reach the skeletonizer.
+    solid_mask = None
+    if cfg.solid_mode in ("outline", "ignore"):
+        stroke_mask, solid_mask = _solids.split_solid(mask, cfg.solid_min_width or 12.0)
+        if solid_mask.any():
+            mask = stroke_mask
+
     skel, dist = _skeleton.skeletonize_mask(mask)
 
     h, w = proc.shape
     chains = _trace.trace_skeleton(skel)
     paths = _build_paths(chains, dist, w, h)
+
+    solid_paths = 0
+    if cfg.solid_mode == "outline" and solid_mask is not None and solid_mask.any():
+        outlines = _solids.contour_paths(solid_mask)
+        solid_paths = len(outlines)
+        paths.extend(outlines)
 
     paths = _opt.prune_spurs(paths, cfg.spur_length, cfg.prune_iterations)
     if cfg.join_paths:
@@ -67,15 +92,6 @@ def run(
 
     if cfg.min_path_length > 0:
         paths = [p for p in paths if p.length >= cfg.min_path_length or p.closed]
-
-    # Supersampling is an internal fidelity trick: report geometry in source pixels.
-    if scale != 1.0:
-        inv = 1.0 / scale
-        for p in paths:
-            p.points = (p.points * inv).astype(np.float32)
-            p.stroke_width *= inv
-        w = int(round(w * inv))
-        h = int(round(h * inv))
 
     pen_up_before = _opt.pen_up_travel(paths)
     if cfg.plot_order:
@@ -99,18 +115,30 @@ def run(
             "rdp_epsilon": cfg.rdp_epsilon,
             "despeckle_min_area": cfg.despeckle_min_area,
             "min_path_length": cfg.min_path_length,
+            "solid_min_width": cfg.solid_min_width,
             "supersample": scale,
         },
+        "solid_mode": cfg.solid_mode,
+        "n_solid_regions": int(solid_paths),
         "elapsed_s": time.perf_counter() - t0,
     }
+
+    # Geometry is in processed pixels, so scale DPI by the same factor to keep
+    # px_per_mm (and therefore any millimetre readout) physically correct.
+    source_dpi = cfg.dpi or dpi
+    effective_dpi = None
+    if source_dpi:
+        px_scale = w / gray.shape[1] if gray.shape[1] else 1.0
+        effective_dpi = source_dpi * px_scale
 
     result = TraceResult(
         paths=paths,
         width=w,
         height=h,
-        dpi=cfg.dpi or dpi,
+        dpi=effective_dpi,
         angle=angle,
         stats=stats,
+        gray=proc,
     )
     if debug:
         result.debug = {"gray": proc, "mask": mask, "skeleton": skel}

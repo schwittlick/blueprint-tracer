@@ -18,6 +18,7 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 blueprint-tracer = "blueprint_tracer.cli:main"
+blueprint-tracer-gui = "blueprint_tracer.gui.app:main"
 
 [build-system]
 requires = ["setuptools>=68"]
