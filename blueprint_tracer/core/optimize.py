@@ -126,11 +126,40 @@ def order_for_plotting(paths: list[Path], start=(0.0, 0.0)) -> list[Path]:
     return order
 
 
-def pen_up_travel(paths: list[Path], start=(0.0, 0.0)) -> float:
-    """Total pen-up (non-drawing) travel for the given path order."""
+def order_groups_for_plotting(groups: list[list[Path]], start=(0.0, 0.0)) -> list[Path]:
+    """Order each group internally, keeping the groups themselves contiguous.
+
+    A globally optimal tour interleaves everything, which is wrong when groups map
+    to different pens: the plotter would swap pens at the carousel on almost every
+    path and lose far more time than the shorter travel saves. Ordering within each
+    group -- and starting each group from where the previous one ended, so the seam
+    is not wasted -- keeps one pen change per group while still recovering most of
+    the travel saving.
+    """
+    out: list[Path] = []
+    cur = np.asarray(start, dtype=np.float64)
+    for group in groups:
+        if not group:
+            continue
+        ordered = order_for_plotting(group, start=cur)
+        out.extend(ordered)
+        cur = ordered[-1].points[-1].astype(np.float64)
+    return out
+
+
+def pen_up_travel(paths: list[Path], start=None) -> float:
+    """Total pen-up (non-drawing) travel for the given path order.
+
+    Only the moves *between* consecutive paths are counted, which is exactly what a
+    consumer can recompute from the exported geometry. The approach from a home
+    position is excluded unless ``start`` is given: no home position is recorded in
+    the file, so including one would make the reported figure unverifiable.
+    """
     if not paths:
         return 0.0
-    total = float(np.hypot(*(paths[0].points[0] - np.asarray(start))))
+    total = 0.0
+    if start is not None:
+        total += float(np.hypot(*(paths[0].points[0] - np.asarray(start))))
     for a, b in zip(paths, paths[1:]):
         total += float(np.hypot(*(b.points[0] - a.points[-1])))
     return total

@@ -83,6 +83,8 @@ def run(
             mask, stroke_width * px_scale,
             min_glyphs=cfg.text_min_glyphs,
             max_glyph_height=cfg.text_max_glyph_height,
+            gap_ratio=cfg.text_gap_ratio,
+            line_ratio=cfg.text_line_ratio,
         )
 
     skel, dist = _skeleton.skeletonize_mask(mask)
@@ -107,13 +109,16 @@ def run(
     if cfg.min_path_length > 0:
         paths = [p for p in paths if p.length >= cfg.min_path_length or p.closed]
 
+    # Identify the strokes *before* the plotting permutation. Numbering them
+    # afterwards would just restate their array position, leaving the exported id
+    # and plot_order as the same 0..n-1 run and losing the trace order entirely.
+    for i, p in enumerate(paths):
+        p.id = i
+
     pen_up_before = _opt.pen_up_travel(paths)
     if cfg.plot_order:
         paths = _opt.order_for_plotting(paths)
     pen_up_after = _opt.pen_up_travel(paths)
-
-    for i, p in enumerate(paths):
-        p.id = i
 
     # Assign after ordering and joining, so neither can invalidate the mapping.
     if regions:
@@ -125,6 +130,9 @@ def run(
         "ink_length_px": float(sum(p.length for p in paths)),
         "pen_up_before_px": float(pen_up_before),
         "pen_up_after_px": float(pen_up_after),
+        # Says outright whether paths are in plotting sequence, rather than leaving
+        # a consumer to infer it from the travel figures.
+        "plot_ordered": bool(cfg.plot_order),
         "stroke_width_px": round(stroke_width, 2),
         "resolved": {
             "sauvola_window": cfg.sauvola_window,
@@ -163,6 +171,21 @@ def run(
     if debug:
         result.debug = {"gray": proc, "mask": mask, "skeleton": skel}
     return result
+
+
+def geometry_stats(paths: list[Path]) -> dict:
+    """Measure the geometry as it stands.
+
+    Anything that recomposes the path list -- dropping hidden regions, adding
+    Hershey lettering -- must refresh these, or the figures describe a drawing that
+    was never written and cannot be checked against the file.
+    """
+    return {
+        "n_paths": len(paths),
+        "n_points": int(sum(len(p.points) for p in paths)),
+        "ink_length_px": float(sum(p.length for p in paths)),
+        "pen_up_after_px": float(_opt.pen_up_travel(paths)),
+    }
 
 
 def _build_paths(chains, dist: np.ndarray, w: int, h: int) -> list[Path]:

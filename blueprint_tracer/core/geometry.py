@@ -19,7 +19,7 @@ class Path:            # move through list/set membership by object identity
     points: np.ndarray  # (N, 2) float32, (x, y)
     stroke_width: float = 1.0
     closed: bool = False
-    id: int = -1
+    id: int = -1         # stable identity in trace order; survives plot reordering
     region_id: int = -1  # detected text region this stroke belongs to, or -1
 
     def __post_init__(self) -> None:

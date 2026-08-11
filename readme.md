@@ -103,6 +103,40 @@ is the intended outcome, not a failure. A misread dimension looks authoritative 
 a way a wobbly trace does not, which is why every region starts at `trace` and
 Hershey is always opt-in.
 
+#### Tuning detection, and what tuning cannot fix
+
+Two knobs shape how glyphs are grouped into regions (`--text-gap-ratio`,
+`--text-line-ratio`, or the *Text detection* group in the GUI):
+
+- **Gap ratio** — how far grouping reaches along a line, in character heights.
+  Raise it when one label fragments (`C-294-` and `127` as separate regions);
+  lower it when neighbouring labels fuse into one.
+- **Line ratio** — reach across lines. Raise to merge the rows of a multi-line
+  label; too high and separate lines run together.
+
+Recognition quality, though, is set mostly by the **lettering style**, and no
+parameter changes that. Measured across the sample sheets: printed roman type
+(`plate1`) reads at ~84 % mean confidence, while hand-lettered engineering stencil
+(`m4_survival_rifle`) reads at ~34 % — at the *same* 4 px stroke width and a larger
+cap height. Tesseract's models are trained on printed text; hand lettering is
+effectively a different domain.
+
+Things that do **not** rescue it, all measured rather than assumed: supersampling
+(2×/3× found *fewer* regions and ran 5× slower), a character whitelist (confidence
+fell to ~21 %), the LSTM-only engine mode, OCR crop upscaling from 56 to 150 px,
+and pre-binarizing the crop. None moved mean confidence above ~40 %.
+
+Raising the gap ratio does not help such sheets either — merging fragments costs
+more at the recognizer than the fragments did (`m4` fell from 15 to 10 complete
+part codes going from 1.1 to 2.2).
+
+So for hand-lettered sheets the workflow is the review table, not the parameters:
+detection still finds the labels, low-confidence rows are tinted, you correct the
+text by hand and then switch those regions to Hershey. Anything you do not want to
+correct simply stays traced. The only real fix for the recognizer itself is a model
+trained on this lettering, or a higher-resolution source scan — upscaling a 14 px
+glyph adds no information the recognizer did not already have.
+
 The canvas displays the *preprocessed* page rather than the raw scan, because
 deskew and preview downscaling mean only that frame shares coordinates with the
 traced paths. `TraceResult` geometry is likewise in processed pixels, with `dpi`
@@ -233,13 +267,54 @@ corners preserved (tunable epsilon).
   "image": "MT-1.02.tif",
   "width_px": 1654, "height_px": 1169, "dpi": 300,
   "px_per_mm": 11.81,
+  "stats": { "plot_ordered": true, "n_paths": 713, "pen_up_after_px": 8016 },
+  "text_regions": [
+    { "id": 3, "x": 736, "y": 498, "width": 89, "height": 15,
+      "orientation": "horizontal", "text": "GROOVED",
+      "confidence": 87.0, "mode": "hershey" }
+  ],
   "paths": [
-    { "id": 0, "points": [[102.5,340.0],[980.2,340.1]],
+    { "id": 341, "points": [[102.5,340.0],[980.2,340.1]],
       "stroke_width_px": 3.2, "length_px": 1240.7,
-      "closed": false, "plot_order": 0 }
+      "closed": false, "plot_order": 0, "region_id": -1 }
   ]
 }
 ```
+
+**`id` versus `plot_order`.** Paths are emitted in plotting sequence, so
+`plot_order` is simply the array position. `id` is the stroke's identity in *trace*
+order and therefore a permutation — which is what makes the ordering recoverable:
+sort by `id` to get the pre-optimization order, or match strokes between two
+exports of the same drawing. `stats.plot_ordered` says whether the optimization
+ran at all.
+
+(Numbering the paths *after* the reordering would make both fields the same 0..n-1
+run, carrying no information — the array position restated twice.)
+
+**The stats describe the geometry actually written.** `ink_length_px` and
+`pen_up_after_px` are recomputed over the emitted path list, so they can be
+verified against the file:
+
+```python
+import json, math
+d = json.load(open("out.json"))
+ps = [p["points"] for p in sorted(d["paths"], key=lambda p: p["plot_order"])]
+dist = lambda a, b: math.hypot(a[0] - b[0], a[1] - b[1])
+assert round(sum(dist(ps[i-1][-1], ps[i][0]) for i in range(1, len(ps)))) \
+    == round(d["stats"]["pen_up_after_px"])
+```
+
+`pen_up_after_px` counts only the moves *between* paths. The approach from a home
+position is excluded deliberately: the file records no home position, so including
+it would make the figure impossible to check. Path direction is baked into
+`points` — the optimizer reverses a path when that shortens the approach, and the
+reversed order is what gets written.
+
+**Ordering scope.** The GUI exports in two blocks — drawing strokes, then Hershey
+lettering — each ordered across the whole block (`stats.plot_order_scope` records
+this). The blocks are kept contiguous on purpose: they map to different pens, and a
+globally optimal tour would interleave them and cost a carousel swap per path,
+losing far more time at the carousel than the shorter travel saves.
 
 ---
 

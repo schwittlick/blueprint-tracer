@@ -57,6 +57,8 @@ class Config:
     detect_text: bool = True         # locate lettering so it can be handled separately
     text_min_glyphs: int = 2         # a lone mark is not a word
     text_max_glyph_height: int = 0   # cap on character height in px; 0 = auto
+    text_gap_ratio: float = 1.1      # reach along the line, in character heights
+    text_line_ratio: float = 0.22    # reach across lines; keeps stacked lines apart
 
     # --- cleanup ---
     despeckle_min_area: Optional[int] = None  # auto ~= half a stroke-square

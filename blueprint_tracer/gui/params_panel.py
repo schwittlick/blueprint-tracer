@@ -171,6 +171,33 @@ class ParamsPanel(QScrollArea):
         form.addRow("Min width", self.solid_min_width)
         root.addWidget(box)
 
+        # --- text ---
+        box = QGroupBox("Text detection")
+        form = QFormLayout(box)
+        self.detect_text = QCheckBox("Detect text regions")
+        self.detect_text.setChecked(True)
+        self.text_gap = QDoubleSpinBox()
+        self.text_gap.setRange(0.3, 6.0); self.text_gap.setSingleStep(0.1)
+        self.text_gap.setDecimals(2); self.text_gap.setValue(1.1)
+        self.text_gap.setToolTip(
+            "How far grouping reaches along a line of text, in character heights.\n"
+            "Raise it if one label fragments into pieces; lower it if separate\n"
+            "labels are being fused into one region.")
+        self.text_line = QDoubleSpinBox()
+        self.text_line.setRange(0.05, 2.0); self.text_line.setSingleStep(0.05)
+        self.text_line.setDecimals(2); self.text_line.setValue(0.22)
+        self.text_line.setToolTip(
+            "Reach across lines. Raise to merge the rows of a multi-line label;\n"
+            "too high and separate lines of text run together.")
+        self.text_max_h = QSpinBox()
+        self.text_max_h.setRange(0, 400); self.text_max_h.setValue(0)
+        self.text_max_h.setToolTip("Largest character height in px to consider; 0 = auto")
+        form.addRow(self.detect_text)
+        form.addRow("Gap ratio", self.text_gap)
+        form.addRow("Line ratio", self.text_line)
+        form.addRow("Max glyph px", self.text_max_h)
+        root.addWidget(box)
+
         # --- cleanup ---
         box = QGroupBox("Cleanup")
         form = QFormLayout(box)
@@ -219,8 +246,11 @@ class ParamsPanel(QScrollArea):
                   self.fill_solid, self.remove_border, self.join_paths, self.plot_order,
                   self.auto_scale):
             w.toggled.connect(self.changed)
-        for w in (self.sauvola_k, self.manual_angle, self.join_angle, self.supersample):
+        for w in (self.sauvola_k, self.manual_angle, self.join_angle, self.supersample,
+                  self.text_gap, self.text_line):
             w.valueChanged.connect(self.changed)
+        self.detect_text.toggled.connect(self.changed)
+        self.text_max_h.valueChanged.connect(self.changed)
         for w in (self.close_gaps,):
             w.valueChanged.connect(self.changed)
         self.method.currentTextChanged.connect(self.changed)
@@ -245,6 +275,10 @@ class ParamsPanel(QScrollArea):
         cfg.sauvola_window = self.sauvola_window.value()
         cfg.sauvola_k = float(self.sauvola_k.value())
         cfg.fill_solid = self.fill_solid.isChecked()
+        cfg.detect_text = self.detect_text.isChecked()
+        cfg.text_gap_ratio = float(self.text_gap.value())
+        cfg.text_line_ratio = float(self.text_line.value())
+        cfg.text_max_glyph_height = int(self.text_max_h.value())
         cfg.solid_mode = self.solid_mode.currentText()
         cfg.solid_min_width = self.solid_min_width.value()
         cfg.despeckle_min_area = self.despeckle.value()
@@ -272,6 +306,10 @@ class ParamsPanel(QScrollArea):
         self.sauvola_window.set_value(cfg.sauvola_window)
         self.sauvola_k.setValue(cfg.sauvola_k)
         self.fill_solid.setChecked(cfg.fill_solid)
+        self.detect_text.setChecked(cfg.detect_text)
+        self.text_gap.setValue(cfg.text_gap_ratio)
+        self.text_line.setValue(cfg.text_line_ratio)
+        self.text_max_h.setValue(cfg.text_max_glyph_height)
         self.solid_mode.setCurrentText(cfg.solid_mode)
         self.solid_min_width.set_value(cfg.solid_min_width)
         self.despeckle.set_value(cfg.despeckle_min_area)

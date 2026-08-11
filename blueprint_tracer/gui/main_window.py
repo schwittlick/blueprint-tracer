@@ -25,7 +25,8 @@ from PySide6.QtWidgets import (
 
 from blueprint_tracer.core.config import Config
 from blueprint_tracer.core.io_utils import load_gray
-from blueprint_tracer.core.pipeline import TraceResult
+from blueprint_tracer.core import optimize
+from blueprint_tracer.core.pipeline import TraceResult, geometry_stats
 from blueprint_tracer.export.json_export import write_json
 from blueprint_tracer.export.render import render_paths
 from blueprint_tracer.export.svg import write_svg
@@ -39,6 +40,27 @@ from blueprint_tracer.gui.worker import OcrWorker, TraceWorker
 
 PREVIEW_MAX_DIM = 1600
 DEBOUNCE_MS = 250
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _project_dir(name: str) -> str:
+    """Locate the project's data/ or out/ folder for file dialogs to start in.
+
+    The working directory wins so a copy of the project elsewhere still opens its
+    own scans; the source tree is the fallback when the app is launched from
+    somewhere unrelated. An empty string leaves the dialog at its default.
+    """
+    for base in (os.getcwd(), _REPO_ROOT):
+        path = os.path.join(base, name)
+        if os.path.isdir(path):
+            return path
+    return ""
+
+
+def _out_path(name: str) -> str:
+    """Suggest ``name`` inside out/, falling back to a bare name if there is none."""
+    return os.path.join(_project_dir("out"), name)
 
 
 def _carry_over_decisions(old_regions: list, new_regions: list) -> None:
@@ -306,7 +328,7 @@ class MainWindow(QMainWindow):
 
     def open_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open blueprint scan", "",
+            self, "Open blueprint scan", _project_dir("data"),
             "Images (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.webp);;All files (*)",
         )
         if path:
@@ -330,7 +352,8 @@ class MainWindow(QMainWindow):
 
     def open_project(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open project", "", "Project (*.btproj *.json);;All files (*)")
+            self, "Open project", _project_dir("out"),
+            "Project (*.btproj *.json);;All files (*)")
         if not path:
             return
         try:
@@ -348,8 +371,10 @@ class MainWindow(QMainWindow):
             self._apply_restore()
 
     def save_project_as(self) -> None:
+        stem = os.path.splitext(os.path.basename(self.image_path))[0] if self.image_path else ""
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save project", "", "Project (*.btproj);;All files (*)")
+            self, "Save project", _out_path(stem + ".btproj" if stem else ""),
+            "Project (*.btproj);;All files (*)")
         if not path:
             return
         if not os.path.splitext(path)[1]:
@@ -368,7 +393,8 @@ class MainWindow(QMainWindow):
             return
         base, _ = QFileDialog.getSaveFileName(
             self, "Export SVG + JSON + traced PNG",
-            os.path.splitext(self.image_path)[0], "SVG (*.svg);;All files (*)")
+            _out_path(os.path.splitext(os.path.basename(self.image_path))[0]),
+            "SVG (*.svg);;All files (*)")
         if not base:
             return
         base = os.path.splitext(base)[0]
@@ -376,17 +402,35 @@ class MainWindow(QMainWindow):
         # Export exactly what is on screen: manual edits included, hidden regions
         # left out, and Hershey lettering standing in where it was chosen.
         hidden = self.text_panel.hidden_region_ids()
-        visible = [p for p in self.edits.paths if p.region_id not in hidden]
-        visible = visible + list(getattr(self, "text_paths", []))
+        drawing = [p for p in self.edits.paths if p.region_id not in hidden]
+        lettering = list(self.text_paths)
+
+        # Removing regions and appending generated lettering makes a different
+        # drawing from the one the pipeline optimized, so order it again. Drawing
+        # and lettering stay in separate blocks because they map to separate pens:
+        # interleaving them would cost a carousel swap per path.
+        if self.params.plot_order.isChecked():
+            paths = optimize.order_groups_for_plotting([drawing, lettering])
+        else:
+            paths = drawing + lettering
+
         out = TraceResult(
-            paths=visible, width=self.result.width, height=self.result.height,
-            dpi=self.result.dpi, angle=self.result.angle, stats=dict(self.result.stats),
-            text_regions=self.result.text_regions,
+            paths=paths, width=self.result.width, height=self.result.height,
+            dpi=self.result.dpi, angle=self.result.angle,
+            stats=dict(self.result.stats), text_regions=self.result.text_regions,
         )
-        for i, p in enumerate(out.paths):
-            p.id = i
-        out.stats["n_paths"] = len(out.paths)
-        out.stats["n_points"] = int(sum(len(p.points) for p in out.paths))
+        # Keep each traced stroke's identity; renumbering here would flatten id
+        # back onto the array position and destroy the plot-order permutation.
+        # Hershey lettering is generated, so it gets fresh ids past the last one.
+        next_id = max((p.id for p in self.edits.paths if p.id >= 0), default=-1) + 1
+        for p in out.paths:
+            if p.id < 0:
+                p.id = next_id
+                next_id += 1
+        # Describe the geometry actually written, not the pipeline's earlier run.
+        out.stats.update(geometry_stats(out.paths))
+        out.stats["plot_ordered"] = self.params.plot_order.isChecked()
+        out.stats["plot_order_scope"] = "grouped: drawing, then lettering"
         try:
             write_svg(out, base + ".svg")
             write_json(out, base + ".json", image_name=os.path.basename(self.image_path))

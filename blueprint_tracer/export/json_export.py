@@ -26,15 +26,18 @@ def to_json(result: TraceResult, image_name: Optional[str] = None, round_to: int
         ],
         "paths": [],
     }
-    for p in result.paths:
+    # Paths are emitted in plotting sequence, so plot_order is the array position
+    # and id is the stroke's trace-order identity -- a permutation that lets a
+    # consumer recover the original order, or match strokes across exports.
+    for order, p in enumerate(result.paths):
         doc["paths"].append(
             {
-                "id": p.id,
+                "id": int(p.id),
                 "points": [[round(float(x), round_to), round(float(y), round_to)] for x, y in p.points],
                 "stroke_width_px": round(float(p.stroke_width), 3),
                 "length_px": round(float(p.length), 3),
                 "closed": bool(p.closed),
-                "plot_order": p.id,
+                "plot_order": order,
                 "region_id": int(getattr(p, "region_id", -1)),
             }
         )

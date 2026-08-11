@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from blueprint_tracer.core.geometry import Path, polyline_length
 from blueprint_tracer.core.optimize import (
@@ -58,3 +59,44 @@ def test_ordering_reduces_pen_up_travel():
     ordered = order_for_plotting([a, b, c])
     after = pen_up_travel(ordered)
     assert after <= before
+
+
+def test_pen_up_travel_counts_only_moves_between_paths():
+    """The reported figure must be recomputable from the exported geometry alone,
+    so an approach from an unrecorded home position is not counted."""
+    a = Path(points=np.array([[100, 0], [110, 0]], dtype=np.float32))
+    b = Path(points=np.array([[150, 0], [160, 0]], dtype=np.float32))
+    assert pen_up_travel([a, b]) == pytest.approx(40.0)      # 110 -> 150 only
+    assert pen_up_travel([a, b], start=(0.0, 0.0)) == pytest.approx(140.0)
+
+
+def test_order_groups_keeps_groups_contiguous():
+    """Groups map to different pens, so they must not interleave however much
+    travel a global tour would save."""
+    from blueprint_tracer.core.optimize import order_groups_for_plotting
+
+    # Two families deliberately interleaved in space.
+    group_a = [Path(points=np.array([[i * 100, 0], [i * 100 + 10, 0]], dtype=np.float32),
+                    stroke_width=3.0) for i in range(5)]
+    group_b = [Path(points=np.array([[i * 100 + 50, 5], [i * 100 + 60, 5]], dtype=np.float32),
+                    stroke_width=1.0) for i in range(5)]
+
+    ordered = order_groups_for_plotting([group_a, group_b])
+    assert len(ordered) == 10
+    widths = [p.stroke_width for p in ordered]
+    assert widths == sorted(widths, reverse=True), "groups interleaved"
+    # Exactly one transition between the groups == one pen change.
+    changes = sum(1 for x, y in zip(widths, widths[1:]) if x != y)
+    assert changes == 1
+
+
+def test_order_groups_beats_naive_concatenation():
+    from blueprint_tracer.core.optimize import order_groups_for_plotting
+
+    scattered = [
+        Path(points=np.array([[x, y], [x + 5, y]], dtype=np.float32), stroke_width=1.0)
+        for x, y in [(0, 0), (500, 400), (10, 5), (490, 380), (20, 0), (480, 400)]
+    ]
+    naive = pen_up_travel(scattered)
+    grouped = pen_up_travel(order_groups_for_plotting([scattered]))
+    assert grouped < naive

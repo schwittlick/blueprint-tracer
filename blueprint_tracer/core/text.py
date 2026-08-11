@@ -71,6 +71,8 @@ def detect_text_regions(
     stroke_width: float = 2.0,
     min_glyphs: int = 2,
     max_glyph_height: int = 0,
+    gap_ratio: float = 1.1,
+    line_ratio: float = 0.22,
 ) -> list[TextRegion]:
     """Locate lines of lettering in a binary ink mask.
 
@@ -95,7 +97,8 @@ def detect_text_regions(
     regions: list[TextRegion] = []
     for orientation in ("horizontal", "vertical"):
         regions.extend(
-            _group_into_lines(keep, median_h, mask.shape, orientation, min_glyphs)
+            _group_into_lines(keep, median_h, mask.shape, orientation, min_glyphs,
+                              gap_ratio, line_ratio)
         )
 
     regions = _drop_overlaps(regions)
@@ -153,16 +156,25 @@ def _group_into_lines(
     shape: tuple,
     orientation: str,
     min_glyphs: int,
+    gap_ratio: float = 1.1,
+    line_ratio: float = 0.22,
 ) -> list[TextRegion]:
-    """Merge neighbouring glyphs into text lines by directional dilation."""
+    """Merge neighbouring glyphs into text lines by directional dilation.
+
+    ``gap_ratio`` is how far, in character heights, the dilation reaches along the
+    reading direction. Too small and a part code like ``C-294-127`` fragments at its
+    widest gap; too large and neighbouring labels fuse, which costs more at the
+    recognizer than the fragments did. The default suits well-separated labels;
+    raise it only for sheets whose lettering is loosely spaced.
+    """
     canvas = np.zeros(shape, dtype=np.uint8)
     for x, y, w, h in glyphs:
         canvas[y:y + h, x:x + w] = 1
 
     # Wide enough to bridge inter-character gaps, shallow enough that separate
     # lines of a multi-line label stay separate.
-    span = max(2, int(round(char_height * 1.1)))
-    thin = max(1, int(round(char_height * 0.22)))
+    span = max(2, int(round(char_height * gap_ratio)))
+    thin = max(1, int(round(char_height * line_ratio)))
     ksize = (span, thin) if orientation == "horizontal" else (thin, span)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, ksize)
     merged = cv2.dilate(canvas, kernel)

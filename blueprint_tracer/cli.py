@@ -40,6 +40,9 @@ def build_config(args: argparse.Namespace) -> Config:
     cfg.close_gaps = args.close_gaps
     cfg.remove_border = args.remove_border
     cfg.fill_solid = not args.no_fill_solid
+    cfg.detect_text = not args.no_detect_text
+    cfg.text_gap_ratio = args.text_gap_ratio
+    cfg.text_line_ratio = args.text_line_ratio
     cfg.solid_mode = args.solid_mode
     cfg.solid_min_width = args.solid_min_width
     cfg.deskew = not args.no_deskew
@@ -101,6 +104,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--despeckle", type=int, default=None, help="min component area px (default: auto)")
     ap.add_argument("--close-gaps", type=int, default=0, help="gap-closing kernel (px, 0=off)")
     ap.add_argument("--remove-border", action="store_true", help="strip edge-touching scan cruft")
+    ap.add_argument("--no-detect-text", action="store_true", help="skip text region detection")
+    ap.add_argument("--text-gap-ratio", type=float, default=1.1,
+                    help="grouping reach along a text line, in character heights "
+                         "(raise if labels fragment, lower if they fuse)")
+    ap.add_argument("--text-line-ratio", type=float, default=0.22,
+                    help="grouping reach across text lines")
     ap.add_argument("--solid-mode", default="outline", choices=["outline", "skeleton", "ignore"],
                     help="filled shapes: trace their outline (default), skeletonize them "
                          "into a medial axis, or drop them entirely")
