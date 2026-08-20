@@ -89,6 +89,20 @@ def test_project_roundtrip(tmp_path):
     assert loaded_regions == []
 
 
+def test_params_panel_carries_ink_shaping_both_ways(qapp):
+    """A control that does not survive the config bridge silently does nothing."""
+    from blueprint_tracer.gui.params_panel import ParamsPanel
+
+    panel = ParamsPanel()
+    panel.from_config(Config(ink_morph=2, pre_smooth=1.5))
+    assert panel.ink_morph.value() == 2
+    assert panel.pre_smooth.value() == pytest.approx(1.5)
+
+    cfg = panel.to_config()
+    assert cfg.ink_morph == 2
+    assert cfg.pre_smooth == pytest.approx(1.5)
+
+
 def test_window_traces_and_aligns_overlay(qapp, tmp_path):
     """The canvas must show the preprocessed page, so paths and image share a frame."""
     import cv2
@@ -222,6 +236,57 @@ def test_hiding_text_regions_is_non_destructive(qapp, tmp_path):
         QFileDialog.getSaveFileName = original
 
     assert len(restored_json["paths"]) == total, "restoring did not bring paths back"
+    win.worker.stop()
+    win.close()
+
+
+def test_retrace_keeps_the_view_on_the_same_part_of_the_page(qapp, tmp_path):
+    """Supersample rescales the page; the user must not be thrown somewhere else."""
+    import cv2
+
+    from blueprint_tracer.gui.main_window import MainWindow
+
+    img = np.full((300, 400), 255, dtype=np.uint8)
+    cv2.rectangle(img, (60, 60), (340, 240), 0, 2)
+    cv2.line(img, (60, 150), (340, 150), 0, 2)
+    src = tmp_path / "sheet.png"
+    cv2.imwrite(str(src), img)
+
+    win = MainWindow()
+    win.resize(1200, 700)
+    win.show()
+    win.params.deskew.setChecked(False)
+    win.load_image(str(src))
+
+    def wait_for_trace():
+        loop = QEventLoop()
+        conn = win.worker.finished_trace.connect(lambda *_: QTimer.singleShot(50, loop.quit))
+        QTimer.singleShot(30000, loop.quit)
+        loop.exec()
+        win.worker.finished_trace.disconnect(conn)
+
+    wait_for_trace()
+
+    # Zoom into the lower right quadrant of the page.
+    page = win.canvas.sceneRect()
+    win.canvas.fitInView(
+        QRectF(page.width() * 0.5, page.height() * 0.5,
+               page.width() * 0.25, page.height() * 0.25),
+        Qt.KeepAspectRatio,
+    )
+    qapp.processEvents()
+    before = win.canvas.view_state()
+
+    win.params.supersample.setValue(2.0)
+    wait_for_trace()
+    qapp.processEvents()
+
+    assert win.canvas.sceneRect().width() != page.width(), "page size did not change"
+    after = win.canvas.view_state()
+    assert after is not None and before is not None
+    for got, want in zip(after, before):
+        assert got == pytest.approx(want, rel=0.02)
+
     win.worker.stop()
     win.close()
 

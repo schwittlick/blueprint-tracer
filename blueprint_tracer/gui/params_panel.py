@@ -95,12 +95,13 @@ class ParamsPanel(QScrollArea):
         box = QGroupBox("Scale")
         form = QFormLayout(box)
         self.supersample = QDoubleSpinBox()
-        self.supersample.setRange(0.25, 4.0)
+        self.supersample.setRange(0.25, 8.0)
         self.supersample.setSingleStep(0.5)
         self.supersample.setValue(1.0)
         self.supersample.setToolTip(
             "Upscale before tracing. Values above 1 recover small text on\n"
-            "low-resolution scans at the cost of speed."
+            "low-resolution scans at the cost of speed — work grows with the\n"
+            "square of the factor, so 4x and above can take a while."
         )
         form.addRow("Supersample", self.supersample)
         self.auto_scale = QCheckBox("Scale parameters to stroke width")
@@ -126,10 +127,32 @@ class ParamsPanel(QScrollArea):
         self.manual_angle.setDecimals(2)
         self.manual_angle.setSingleStep(0.25)
         self.use_manual_angle = QCheckBox("Manual angle")
+        self.ink_morph = QSpinBox()
+        self.ink_morph.setRange(-5, 5)
+        self.ink_morph.setValue(0)
+        self.ink_morph.setToolTip(
+            "Thicken (+) or thin (-) the ink before binarizing, in pixels.\n"
+            "Thicken to smooth a crisp but thin drawing: a 1 px line binarizes\n"
+            "to a staircase the skeleton then traces step by step. Raise\n"
+            "Supersample first, or there is no room to widen into.\n"
+            "Thin to separate lines that bleed together on over-inked copies."
+        )
+        self.pre_smooth = QDoubleSpinBox()
+        self.pre_smooth.setRange(0.0, 5.0)
+        self.pre_smooth.setSingleStep(0.25)
+        self.pre_smooth.setDecimals(2)
+        self.pre_smooth.setValue(0.0)
+        self.pre_smooth.setToolTip(
+            "Blur radius applied to the ink before binarizing; 0 = off.\n"
+            "Softens the pixel staircase on upscaled line-work. Too much\n"
+            "closes small lettering and merges tightly spaced detail."
+        )
         form.addRow(self.invert_auto)
         form.addRow(self.flatfield)
         form.addRow(self.deskew)
         form.addRow(self.use_manual_angle, self.manual_angle)
+        form.addRow("Ink thickness", self.ink_morph)
+        form.addRow("Ink smoothing", self.pre_smooth)
         root.addWidget(box)
 
         # --- binarize ---
@@ -247,7 +270,7 @@ class ParamsPanel(QScrollArea):
                   self.auto_scale):
             w.toggled.connect(self.changed)
         for w in (self.sauvola_k, self.manual_angle, self.join_angle, self.supersample,
-                  self.text_gap, self.text_line):
+                  self.text_gap, self.text_line, self.ink_morph, self.pre_smooth):
             w.valueChanged.connect(self.changed)
         self.detect_text.toggled.connect(self.changed)
         self.text_max_h.valueChanged.connect(self.changed)
@@ -271,6 +294,8 @@ class ParamsPanel(QScrollArea):
         cfg.manual_angle = (
             float(self.manual_angle.value()) if self.use_manual_angle.isChecked() else None
         )
+        cfg.ink_morph = int(self.ink_morph.value())
+        cfg.pre_smooth = float(self.pre_smooth.value())
         cfg.threshold_method = self.method.currentText()
         cfg.sauvola_window = self.sauvola_window.value()
         cfg.sauvola_k = float(self.sauvola_k.value())
@@ -302,6 +327,8 @@ class ParamsPanel(QScrollArea):
         self.use_manual_angle.setChecked(cfg.manual_angle is not None)
         if cfg.manual_angle is not None:
             self.manual_angle.setValue(cfg.manual_angle)
+        self.ink_morph.setValue(cfg.ink_morph)
+        self.pre_smooth.setValue(cfg.pre_smooth)
         self.method.setCurrentText(cfg.threshold_method)
         self.sauvola_window.set_value(cfg.sauvola_window)
         self.sauvola_k.setValue(cfg.sauvola_k)

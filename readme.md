@@ -165,7 +165,9 @@ uv run blueprint-tracer data/MT-1.02.tif -o out --max-dim 2000 --render
 runs are instant.
 
 **Useful flags:** `--max-dim N` (downscale for speed), `--supersample 2` (upscale
-before tracing; recovers small text on low-resolution scans), `--method
+before tracing; recovers small text on low-resolution scans), `--ink-morph 1` /
+`--pre-smooth 1` (thicken and soften the ink so thin crisp lines stop
+skeletonizing into a wobble — use with `--supersample 2`), `--method
 sauvola|adaptive|otsu`, `--sauvola-k` (lower keeps faint strokes solid),
 `--solid-mode outline|skeleton|ignore` (see below),
 `--rdp` / `--spur` / `--despeckle` / `--solid-min-width` (auto by default — pass a
@@ -194,6 +196,12 @@ the crossbars off 2 px-stroke lettering — small text traced as `(,-(YIVI II`
 instead of `GROOVED CASING`. Pass any parameter explicitly to override the
 derived value, or `--no-auto-scale` to fall back to fixed defaults. The resolved
 values are reported in each JSON under `stats.resolved`.
+
+The width is measured twice: once on the source, because preprocessing is itself
+parameterised by it, and again on the preprocessed page, which is the frame every
+later stage works in. Supersampling, rotation and ink shaping all change the
+stroke, and an estimate that disagrees with the image detunes every derived
+value. Both figures are reported (`stats.stroke_width_px` is the processed one).
 
 <details>
 <summary>Alternative: an explicit, persistent venv</summary>
@@ -225,6 +233,14 @@ an optional pixel→mm scale).
   lighting / aged-paper gradients.
 - *Deskew* — estimate skew from the dominant line-angle histogram (Hough) and
   rotate; always allow a manual angle override.
+- *Ink shaping* — optionally thicken or thin the ink (`--ink-morph`) and soften
+  its edges (`--pre-smooth`) before thresholding. Thickening is the fix for a
+  crisp but thin original: a 1–2 px anti-aliased line can only binarize into a
+  staircase, and the skeleton then traces every step of it. Upscale with
+  `--supersample 2` and thicken by 1 px and the same line becomes a ribbon whose
+  medial axis is smooth — on `CN_224435201_U.png` that halves the point count
+  (7335 → 3917) for the same ink length. Runs last, so the flat-field estimate
+  and the skew search still see undistorted ink.
 
 **2. Binarize** — adaptive threshold, **Sauvola** by default (robust for faded
 document lines), with adaptive-Gaussian and Otsu fallbacks. → binary ink mask.
@@ -337,7 +353,7 @@ blueprint_tracer/
     io_utils.py     load images/DPI (RGBA/palette flattening)
     analyze.py      stroke-width estimate that auto-scales the parameters
     config.py       Config dataclass + resolve() for auto-scaled values
-    preprocess.py   polarity, flat-field, deskew, supersample
+    preprocess.py   polarity, flat-field, deskew, supersample, ink shaping
     binarize.py     sauvola / adaptive / otsu + solid-ink fill
     cleanup.py      despeckle, border removal, morphology
     skeleton.py     skeletonize + medial-axis width

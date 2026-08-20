@@ -56,12 +56,23 @@ def run(
     t0 = time.perf_counter()
 
     # Length-like parameters are multiples of the drawing's stroke width, so measure
-    # it first and resolve the config against it (see Config.resolve).
-    stroke_width = _analyze.estimate_stroke_width(gray)
+    # it first and resolve the config against it (see Config.resolve). Preprocessing
+    # is itself parameterised by the stroke, hence the estimate on the source.
+    base_cfg = cfg
     scale = float(cfg.supersample or 1.0)
-    cfg = cfg.resolve(stroke_width * scale, image_shape=gray.shape)
+    source_stroke = _analyze.estimate_stroke_width(gray)
+    proc, angle = _preprocess.preprocess(
+        gray, cfg.resolve(source_stroke * scale, image_shape=gray.shape)
+    )
 
-    proc, angle = _preprocess.preprocess(gray, cfg)
+    # Everything from here on is sized against the stroke, so measure it again on
+    # what preprocessing actually produced. Scaling the source estimate by
+    # supersample assumes resampling is the only thing that changed the ink, which
+    # ink shaping (and, mildly, rotation and max_dim) makes false -- and a stroke
+    # estimate that disagrees with the image detunes every auto-derived value.
+    stroke_width = _analyze.estimate_stroke_width(proc)
+    cfg = base_cfg.resolve(stroke_width, image_shape=proc.shape)
+
     mask = _binarize.binarize(proc, cfg)
     mask = _cleanup.cleanup(mask, cfg)
 
@@ -75,12 +86,10 @@ def run(
 
     regions: list = []
     if cfg.detect_text:
-        # The mask is in processed pixels, which max_dim may have shrunk relative to
-        # the source the stroke width was measured on. Scale to match, or the glyph
-        # size band is wrong for every preview.
-        px_scale = mask.shape[1] / gray.shape[1] if gray.shape[1] else 1.0
+        # Both the mask and the stroke estimate are in processed pixels, so the glyph
+        # size band needs no conversion.
         regions = _text.detect_text_regions(
-            mask, stroke_width * px_scale,
+            mask, stroke_width,
             min_glyphs=cfg.text_min_glyphs,
             max_glyph_height=cfg.text_max_glyph_height,
             gap_ratio=cfg.text_gap_ratio,
@@ -133,7 +142,9 @@ def run(
         # Says outright whether paths are in plotting sequence, rather than leaving
         # a consumer to infer it from the travel figures.
         "plot_ordered": bool(cfg.plot_order),
+        # Measured on the preprocessed page, matching the frame the geometry is in.
         "stroke_width_px": round(stroke_width, 2),
+        "source_stroke_width_px": round(source_stroke, 2),
         "resolved": {
             "sauvola_window": cfg.sauvola_window,
             "sauvola_k": cfg.sauvola_k,

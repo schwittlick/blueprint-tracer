@@ -480,6 +480,9 @@ class MainWindow(QMainWindow):
         # source image no longer shares a coordinate frame with the paths.
         if result.gray is not None:
             first = self.canvas.image_item.pixmap().isNull()
+            # Parameters like supersample change the page's pixel size, so hold on
+            # to the area being looked at and put the view back on it afterwards.
+            view = None if first else self.canvas.view_state()
             self.canvas.set_image(result.gray)
             self.canvas.set_image_visible(
                 not self.source_canvas.isVisible() and self.chk_image.isChecked()
@@ -487,6 +490,9 @@ class MainWindow(QMainWindow):
             self._refresh_source_view()
             if first:
                 self.fit_views()
+            else:
+                self.canvas.restore_view_state(view)
+                self._sync_views(self.canvas, self.source_canvas)
         # A re-trace produces brand new regions; carry the review decisions over so
         # nudging a parameter does not silently discard them.
         _carry_over_decisions(self.text_panel.regions, result.text_regions)

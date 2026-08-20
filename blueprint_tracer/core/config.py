@@ -38,6 +38,8 @@ class Config:
     deskew_max_angle: float = 10.0   # only correct skews within +/- this many degrees
     deskew_min_angle: float = 0.15   # below this, skip rotation (resampling blurs thin ink)
     manual_angle: Optional[float] = None   # override auto-deskew (degrees)
+    ink_morph: int = 0               # px radius: >0 thickens the ink, <0 thins it
+    pre_smooth: float = 0.0          # gaussian sigma applied to the ink; 0 = off
 
     # --- binarize ---
     threshold_method: str = "sauvola"      # "sauvola" | "adaptive" | "otsu"

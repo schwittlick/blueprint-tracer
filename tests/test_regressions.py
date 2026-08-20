@@ -10,7 +10,7 @@ import numpy as np
 from blueprint_tracer.core.analyze import estimate_stroke_width
 from blueprint_tracer.core.config import Config
 from blueprint_tracer.core.pipeline import run
-from blueprint_tracer.core.preprocess import flatfield, is_inverted
+from blueprint_tracer.core.preprocess import flatfield, is_inverted, shape_ink
 from blueprint_tracer.core.simplify import simplify_points
 from blueprint_tracer.core.trace import trace_skeleton
 from blueprint_tracer.export.svg import to_svg
@@ -229,3 +229,34 @@ def test_estimate_stroke_width_matches_drawn_width():
         est = estimate_stroke_width(img)
         # Erring high is deliberate (see estimate_stroke_width): never underestimate.
         assert actual <= est <= actual + 1.5, f"drew {actual}px, estimated {est}"
+
+
+def test_shape_ink_thickens_and_thins_dark_ink():
+    """Ink is dark, so erode must *grow* it -- the sign convention is inverted
+    relative to the mask-space morphology in cleanup."""
+    img = np.full((80, 80), 255, dtype=np.uint8)
+    cv2.line(img, (10, 40), (70, 40), 0, 3)
+    drawn = int((img[:, 40] < 128).sum())
+
+    thicker = int((shape_ink(img, 2, 0.0)[:, 40] < 128).sum())
+    thinner = int((shape_ink(img, -1, 0.0)[:, 40] < 128).sum())
+    assert thicker > drawn > thinner
+
+
+def test_stroke_width_measured_after_ink_shaping():
+    """Auto-scaled parameters are multiples of the stroke the *binarizer* sees.
+
+    Thickening the ink used to leave the estimate at its source value, silently
+    detuning every derived window and length.
+    """
+    img = np.full((300, 300), 255, dtype=np.uint8)
+    cv2.line(img, (20, 150), (280, 150), 0, 2)
+    cv2.line(img, (150, 20), (150, 280), 0, 2)
+
+    plain = run(img, Config(flatfield=False, deskew=False, detect_text=False))
+    thick = run(img, Config(flatfield=False, deskew=False, detect_text=False, ink_morph=2))
+
+    assert thick.stats["stroke_width_px"] > plain.stats["stroke_width_px"] + 2
+    assert thick.stats["source_stroke_width_px"] == plain.stats["source_stroke_width_px"]
+    # The derived values must follow the thickened stroke, not the source one.
+    assert thick.stats["resolved"]["sauvola_window"] > plain.stats["resolved"]["sauvola_window"]

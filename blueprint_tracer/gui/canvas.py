@@ -258,6 +258,39 @@ class Canvas(QGraphicsView):
             self.fitInView(rect, Qt.KeepAspectRatio)
             self.viewport_changed.emit()
 
+    def view_state(self) -> Optional[tuple[float, float, float]]:
+        """Capture where the user is looking, independent of the page's pixel size.
+
+        Supersampling (and preview downscaling) re-traces the drawing into a page
+        of a different pixel size, so a transform and scroll offset kept verbatim
+        would land somewhere else entirely. Storing the centre as a fraction of the
+        page and the zoom as screen pixels per page width survives that rescaling.
+        """
+        rect = self._scene.sceneRect()
+        if rect.width() <= 1 or rect.height() <= 1:
+            return None
+        centre = self.mapToScene(self.viewport().rect().center())
+        return (
+            (centre.x() - rect.left()) / rect.width(),
+            (centre.y() - rect.top()) / rect.height(),
+            self.transform().m11() * rect.width(),
+        )
+
+    def restore_view_state(self, state: Optional[tuple[float, float, float]]) -> None:
+        """Look at the same part of the page again, whatever size it is now."""
+        if state is None:
+            return
+        fx, fy, page_span = state
+        rect = self._scene.sceneRect()
+        if rect.width() <= 1 or rect.height() <= 1:
+            return
+        scale = page_span / rect.width()
+        if scale <= 0:
+            return
+        self.setTransform(QTransform.fromScale(scale, scale))
+        self.centerOn(rect.left() + fx * rect.width(), rect.top() + fy * rect.height())
+        self.viewport_changed.emit()
+
     def sync_viewport_from(self, other: "Canvas") -> None:
         """Mirror another view's zoom and scroll position."""
         self.setTransform(other.transform())

@@ -1,4 +1,5 @@
-"""Preprocessing: downscale/supersample, polarity normalization, flat-field, deskew.
+"""Preprocessing: downscale/supersample, polarity normalization, flat-field, deskew,
+ink shaping.
 
 Output is always a uint8 grayscale image where ink is dark on a light background.
 """
@@ -47,7 +48,45 @@ def preprocess(gray: np.ndarray, cfg: Config) -> tuple[np.ndarray, float]:
     else:
         angle = 0.0
 
+    # Shaping runs last, on the image the binarizer will actually see: the flat-field
+    # background estimate and the skew search both want undistorted ink, and putting
+    # the smoothing after the rotation lets it absorb the resampling blur as well.
+    if cfg.ink_morph or cfg.pre_smooth:
+        g = shape_ink(g, cfg.ink_morph, cfg.pre_smooth)
+
     return g, angle
+
+
+def shape_ink(gray: np.ndarray, morph_px: int, sigma: float) -> np.ndarray:
+    """Thicken (``morph_px > 0``) or thin (``< 0``) the ink, then soften its edges.
+
+    Thickening is what rescues a crisply drawn but thin original. A 1-2 px
+    anti-aliased line has no choice but to binarize into a 1 px staircase, and the
+    skeleton then faithfully traces every step of it -- the traced curve visibly
+    wobbles and burns points on jitter. Widen the same line into a ribbon several
+    pixels across and its medial axis averages those steps out. Raise ``supersample``
+    first: without the extra resolution there is nothing to widen into, and the
+    thickening only fuses neighbouring detail.
+
+    Thinning is the opposite case -- over-inked photocopies and fax scans, where
+    adjacent lines bleed into each other and would otherwise skeletonize as one.
+
+    Ink is dark, so the grayscale operations are inverted relative to the mask-space
+    ones in :mod:`~blueprint_tracer.core.cleanup`: eroding takes the local minimum
+    and therefore *grows* dark ink.
+
+    Both steps trade detail for smoothness, and the small stuff goes first: too much
+    of either closes the counters of small lettering and merges tightly spaced
+    features (bolt circles, hatching) into blobs.
+    """
+    g = gray
+    k = abs(int(morph_px))
+    if k:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1))
+        g = cv2.erode(g, kernel) if morph_px > 0 else cv2.dilate(g, kernel)
+    if sigma and sigma > 0:
+        g = cv2.GaussianBlur(g, (0, 0), float(sigma))
+    return g
 
 
 def is_inverted(gray: np.ndarray) -> bool:

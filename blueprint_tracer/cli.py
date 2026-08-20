@@ -47,6 +47,8 @@ def build_config(args: argparse.Namespace) -> Config:
     cfg.solid_min_width = args.solid_min_width
     cfg.deskew = not args.no_deskew
     cfg.flatfield = not args.no_flatfield
+    cfg.ink_morph = args.ink_morph
+    cfg.pre_smooth = args.pre_smooth
     cfg.join_paths = not args.no_join
     cfg.plot_order = not args.no_order
     if args.dpi:
@@ -121,6 +123,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--angle", type=float, default=None, help="manual deskew angle (deg)")
     ap.add_argument("--no-deskew", action="store_true")
     ap.add_argument("--no-flatfield", action="store_true")
+    ap.add_argument("--ink-morph", type=int, default=0,
+                    help="thicken (+px) or thin (-px) the ink before binarizing; "
+                         "thicken with --supersample 2 to stop thin crisp lines "
+                         "skeletonizing into a wobble")
+    ap.add_argument("--pre-smooth", type=float, default=0.0,
+                    help="blur radius applied to the ink before binarizing (0=off)")
     ap.add_argument("--no-join", action="store_true")
     ap.add_argument("--no-order", action="store_true")
     ap.add_argument("--render", action="store_true", help="also write a QA PNG of the trace")
