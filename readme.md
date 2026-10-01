@@ -55,11 +55,14 @@ uv run blueprint-tracer-gui data/MT-1.02.tif
   scroll stay locked together, so you can compare a detail at any magnification.
   In the single-pane view the *Image* and *Vectors* toggles overlay the two
   instead.
-- **Editing** — click or rubber-band to select (shift extends), then *Delete*,
-  *Join* (`J`), or *Straighten* (`T`). Tick *Nodes* to drag individual vertices.
-  Full undo/redo (`Ctrl+Z` / `Ctrl+Shift+Z`).
+- **Editing** — click or rubber-band to select (shift extends), then *Delete*
+  (`Del` or `Backspace`), *Join* (`J`), or *Straighten* (`T`). Tick *Nodes* to drag
+  individual vertices. Full undo/redo (`Ctrl+Z` / `Ctrl+Shift+Z`). The edit keys act
+  on the canvas, so a spin box in the Parameters dock keeps them while you are
+  typing a value into it — click the drawing to hand focus back.
 - **Text regions** — detected lettering is listed in its own dock with a crop
-  preview per region. See [Text and OCR](#text-and-ocr) below.
+  preview per region. *Add text region* (`R`) drags a box around a label the
+  detector missed. See [Text and OCR](#text-and-ocr) below.
 - **Projects** — save the image reference, parameters, your manual edits *and*
   your text-region decisions to a `.btproj` so a session is resumable;
   re-tracing warns before discarding edits.
@@ -85,14 +88,35 @@ and re-render immediately. **Hershey if confident** switches the regions above
 75 % confidence, leaving the rest traced; low-confidence rows are tinted so review
 lands where the recognizer was least sure.
 
+#### Adding a region by hand
+
+The detector is deliberately conservative, so some labels are never claimed: an
+isolated word, lettering wound into the line-work, a size far off the page's
+dominant one. Press **Add text region** (`R`) and drag a box around it. The box
+appears dashed on the canvas and marked ✎ in the dock, and from there it behaves
+like any other region — recognize it, letter it in Hershey, or hide it. Its
+orientation is read from the box's shape, so a tall narrow box letters bottom-up.
+`Esc` (or `R` again) goes back to selecting strokes; while region mode is on the
+left button only draws boxes, so nothing can be selected or deleted.
+
+That replaces deleting the strokes by hand: the traced lettering stays in the
+document and comes back if you switch the region to `trace`. **Remove region**
+drops a box you no longer want (a detected one returns on the next re-trace).
+
+Hand-drawn regions survive a re-trace, including one that changes the page's pixel
+size — supersample, or the jump from the 1600 px preview to a full-resolution
+trace — because no detection would ever put them back.
+
 Why Hershey: these fonts are defined as pen strokes rather than filled outlines, so
 a plotter draws each glyph in a single pass. A centerline trace of 2 px lettering is
 always a wobbly approximation; a Hershey glyph is exactly what a pen can draw.
 
 Nothing is destructive. Hidden and Hershey-substituted regions keep their traced
 strokes in the document and are only skipped when drawing and exporting, so
-switching a region back to `trace` restores it exactly. Text and region decisions
-also survive a re-trace and a project round-trip.
+switching a region back to `trace` restores it exactly. A region set to `hershey`
+with no text yet keeps tracing rather than blanking the label; `hide` is the way
+to say that on purpose. Text and region decisions also survive a re-trace and a
+project round-trip.
 
 **Requires**: `uv pip install -e '.[ocr]'` plus the Tesseract program and language
 data (Arch: `sudo pacman -S tesseract tesseract-data-eng tesseract-data-deu`).

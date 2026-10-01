@@ -12,6 +12,7 @@ from blueprint_tracer.core.config import Config
 from blueprint_tracer.core.pipeline import run
 from blueprint_tracer.core.preprocess import flatfield, is_inverted, shape_ink
 from blueprint_tracer.core.simplify import simplify_points
+from blueprint_tracer.core.text import TextRegion, manual_region, merge_regions
 from blueprint_tracer.core.trace import trace_skeleton
 from blueprint_tracer.export.svg import to_svg
 
@@ -229,6 +230,47 @@ def test_estimate_stroke_width_matches_drawn_width():
         est = estimate_stroke_width(img)
         # Erring high is deliberate (see estimate_stroke_width): never underestimate.
         assert actual <= est <= actual + 1.5, f"drew {actual}px, estimated {est}"
+
+
+def test_manual_region_reads_orientation_from_the_box():
+    """A box's shape is the only evidence of which way the label reads."""
+    across = manual_region(10, 20, 120, 18)
+    down = manual_region(10, 20, 18, 120)
+    assert across.orientation == "horizontal" and across.char_height == 18
+    assert down.orientation == "vertical" and down.char_height == 18
+    assert across.source == "manual" and down.source == "manual"
+
+
+def test_merge_regions_keeps_manual_boxes_across_a_rescaled_retrace():
+    """Supersampling re-traces onto a bigger page; a hand-drawn box kept verbatim
+    would sit somewhere else on the drawing."""
+    drawn = manual_region(100, 50, 60, 20, region_id=3)
+    detected = [TextRegion(id=0, x=600, y=600, width=80, height=20,
+                           char_height=20.0, n_glyphs=4)]
+
+    merged = merge_regions(detected, [drawn], scale=2.0)
+
+    kept = [r for r in merged if r.source == "manual"]
+    assert len(kept) == 1
+    assert (kept[0].x, kept[0].y, kept[0].width, kept[0].height) == (200, 100, 120, 40)
+    assert [r.id for r in merged] == list(range(len(merged))), "ids must stay unique"
+    # The panel is bound to the very object handed in; a copy would strand it.
+    assert kept[0] is drawn
+
+
+def test_merge_regions_lets_the_hand_drawn_box_win_over_a_detection():
+    """The same lettering described twice would make a path's owner arbitrary."""
+    drawn = manual_region(100, 100, 120, 30)
+    same_ink = TextRegion(id=0, x=104, y=102, width=112, height=28,
+                          char_height=28.0, n_glyphs=5)
+    elsewhere = TextRegion(id=1, x=500, y=400, width=90, height=25,
+                           char_height=25.0, n_glyphs=4)
+
+    merged = merge_regions([same_ink, elsewhere], [drawn])
+
+    assert len(merged) == 2
+    assert sum(1 for r in merged if r.source == "manual") == 1
+    assert any(r.x == 500 for r in merged), "an unrelated detection must survive"
 
 
 def test_shape_ink_thickens_and_thins_dark_ink():

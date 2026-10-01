@@ -40,6 +40,7 @@ class TextPanel(QWidget):
     modes_changed = Signal()
     text_edited = Signal(int)           # region id whose text the user changed
     ocr_requested = Signal(str)         # language code
+    region_removed = Signal(int)        # region id the user dropped
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -96,10 +97,17 @@ class TextPanel(QWidget):
             f"Switch regions recognized above {LOW_CONFIDENCE:.0f}% to hershey,\n"
             "leaving the rest traced.")
         self.btn_hide_all = QPushButton("Hide all")
+        self.btn_remove = QPushButton("Remove region")
+        self.btn_remove.setToolTip(
+            "Drop the selected region. Its strokes go back to being traced\n"
+            "normally; a detected region returns on the next re-trace.")
+        self.btn_remove.setEnabled(False)
         self.btn_trace_all.clicked.connect(lambda: self.set_all("trace"))
         self.btn_hershey_ok.clicked.connect(self.accept_confident)
         self.btn_hide_all.clicked.connect(lambda: self.set_all("hide"))
-        for b in (self.btn_trace_all, self.btn_hershey_ok, self.btn_hide_all):
+        self.btn_remove.clicked.connect(self._remove_selected)
+        for b in (self.btn_trace_all, self.btn_hershey_ok, self.btn_hide_all,
+                  self.btn_remove):
             buttons.addWidget(b)
         root.addLayout(buttons)
 
@@ -123,8 +131,11 @@ class TextPanel(QWidget):
         self.table.setRowCount(len(self.regions))
 
         for row, region in enumerate(self.regions):
-            index = QTableWidgetItem(str(region.id))
+            manual = getattr(region, "source", "detected") == "manual"
+            index = QTableWidgetItem(f"{region.id}✎" if manual else str(region.id))
             index.setFlags(index.flags() & ~Qt.ItemIsEditable)
+            if manual:
+                index.setToolTip("Added by hand — the detector did not find this one")
             self.table.setItem(row, COL_ID, index)
 
             preview = QTableWidgetItem()
@@ -150,6 +161,7 @@ class TextPanel(QWidget):
 
         self.table.resizeRowsToContents()
         self._loading = False
+        self.btn_remove.setEnabled(False)   # repopulating drops the selection
         self._update_summary()
 
     def refresh_results(self) -> None:
@@ -165,8 +177,14 @@ class TextPanel(QWidget):
         self._update_summary()
 
     def hidden_region_ids(self) -> set[int]:
-        """Regions whose traced strokes must not be drawn or exported."""
-        return {r.id for r in self.regions if r.mode in ("hide", "hershey")}
+        """Regions whose traced strokes must not be drawn or exported.
+
+        A hershey region with nothing to letter yet still traces: hiding it would
+        leave a blank where the label is, which is exactly the silent replacement
+        this panel exists to prevent. ``hide`` remains the way to say that on purpose.
+        """
+        return {r.id for r in self.regions
+                if r.mode == "hide" or (r.mode == "hershey" and r.text.strip())}
 
     def hershey_regions(self) -> list:
         return [r for r in self.regions if r.mode == "hershey" and r.text.strip()]
@@ -209,6 +227,18 @@ class TextPanel(QWidget):
                 self.table.selectRow(row)
                 return
 
+    def begin_edit(self, region_id: int) -> None:
+        """Select a region and open its text cell, ready to be typed into."""
+        for row, region in enumerate(self.regions):
+            if region.id != region_id:
+                continue
+            self.table.selectRow(row)
+            item = self.table.item(row, COL_TEXT)
+            if item is not None:
+                self.table.setCurrentItem(item)
+                self.table.editItem(item)
+            return
+
     # --- internals ---
 
     def _on_mode_changed(self, region, value: str) -> None:
@@ -232,6 +262,7 @@ class TextPanel(QWidget):
         self.text_edited.emit(region.id)
 
     def _on_row_selected(self) -> None:
+        self.btn_remove.setEnabled(self.selected_region() is not None)
         if self._loading:
             return
         rows = self.table.selectionModel().selectedRows()
@@ -240,6 +271,18 @@ class TextPanel(QWidget):
         row = rows[0].row()
         if 0 <= row < len(self.regions):
             self.region_selected.emit(self.regions[row].id)
+
+    def selected_region(self):
+        rows = self.table.selectionModel().selectedRows()
+        if not rows:
+            return None
+        row = rows[0].row()
+        return self.regions[row] if 0 <= row < len(self.regions) else None
+
+    def _remove_selected(self) -> None:
+        region = self.selected_region()
+        if region is not None:
+            self.region_removed.emit(region.id)
 
     def _tint_row(self, row: int, region) -> None:
         """Amber where the recognizer was unsure, so review lands there first."""
@@ -252,15 +295,18 @@ class TextPanel(QWidget):
 
     def _update_summary(self) -> None:
         if not self.regions:
-            self.summary.setText("no text detected")
+            self.summary.setText("no text detected — draw a box with “Add text region”")
             return
         hidden = sum(1 for r in self.regions if r.mode == "hide")
         hershey = sum(1 for r in self.regions if r.mode == "hershey")
         read = sum(1 for r in self.regions if r.text.strip())
         unsure = sum(1 for r in self.regions if 0 <= r.confidence < LOW_CONFIDENCE)
+        manual = sum(1 for r in self.regions
+                     if getattr(r, "source", "detected") == "manual")
+        added = f" · {manual} added by hand" if manual else ""
         self.summary.setText(
             f"{len(self.regions)} region(s) · {read} read · {unsure} low confidence · "
-            f"{hershey} hershey · {hidden} hidden"
+            f"{hershey} hershey · {hidden} hidden{added}"
         )
 
 

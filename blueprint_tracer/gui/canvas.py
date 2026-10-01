@@ -144,6 +144,10 @@ class TextRegionsItem(QGraphicsItem):
             pen.setWidthF(2.5 if region.id == self.highlight else 1.0)
             if region.id == self.highlight:
                 pen.setColor(QColor("#e2231a"))
+            # Dashes mark the boxes the user drew, so a hand-placed label is never
+            # mistaken for something the detector claims to have found.
+            if getattr(region, "source", "detected") == "manual":
+                pen.setStyle(Qt.DashLine)
             painter.setPen(pen)
             painter.setBrush(Qt.NoBrush)
             painter.drawRect(QRectF(region.x, region.y, region.width, region.height))
@@ -154,6 +158,8 @@ class Canvas(QGraphicsView):
     edit_started = Signal(int)          # path index about to be mutated in place
     paths_edited = Signal(str)          # description for the undo stack
     viewport_changed = Signal()         # pan/zoom, for syncing paired views
+    region_drawn = Signal(QRectF)       # box dragged out in "region" mode
+    region_mode_exited = Signal()       # Escape pressed while drawing regions
     status = Signal(str)
 
     def __init__(self, parent=None) -> None:
@@ -181,12 +187,15 @@ class Canvas(QGraphicsView):
         self.regions_item.setVisible(False)
         self._scene.addItem(self.regions_item)
 
-        self.mode = "select"          # select | node | pan
+        self.mode = "select"          # select | node | pan | region
         self._panning = False
         self._pan_start = QPointF()
         self._drag_node: Optional[tuple[int, int]] = None
         self._rubber: Optional[QRubberBand] = None
         self._rubber_origin = None
+        # What the band in flight is for. Fixed at press, so leaving region mode
+        # mid-drag cannot turn a box the user is drawing into a selection.
+        self._rubber_purpose = "select"
 
         self.horizontalScrollBar().valueChanged.connect(self.viewport_changed)
         self.verticalScrollBar().valueChanged.connect(self.viewport_changed)
@@ -304,6 +313,22 @@ class Canvas(QGraphicsView):
         self.scale(factor, factor)
         self.viewport_changed.emit()
 
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        """Escape leaves region mode.
+
+        A drawing mode with no obvious way out strands the user: the toolbar toggle
+        is the only other exit, and it is easy to miss once the hint has scrolled
+        out of the status bar.
+        """
+        if event.key() == Qt.Key_Escape and self.mode == "region":
+            if self._rubber is not None:      # abandon a box mid-drag
+                self._rubber.hide()
+                self._rubber = None
+                self._rubber_origin = None
+            self.region_mode_exited.emit()
+            return
+        super().keyPressEvent(event)
+
     def mousePressEvent(self, event) -> None:  # noqa: N802
         pos = self.mapToScene(event.position().toPoint())
         if event.button() == Qt.MiddleButton or self.mode == "pan":
@@ -313,6 +338,10 @@ class Canvas(QGraphicsView):
             return
 
         if event.button() == Qt.LeftButton:
+            if self.mode == "region":
+                # Drag out a box over the lettering; nothing is selected on the way.
+                self._start_rubber(event.position().toPoint(), "region")
+                return
             if self.mode == "node":
                 hit = self._hit_node(pos)
                 if hit is not None:
@@ -322,10 +351,7 @@ class Canvas(QGraphicsView):
                     return
             idx = self._hit_path(pos)
             if idx is None:
-                self._rubber_origin = event.position().toPoint()
-                self._rubber = QRubberBand(QRubberBand.Rectangle, self)
-                self._rubber.setGeometry(self._rubber_origin.x(), self._rubber_origin.y(), 0, 0)
-                self._rubber.show()
+                self._start_rubber(event.position().toPoint(), "select")
                 if not (event.modifiers() & Qt.ShiftModifier):
                     self.paths_item.selected.clear()
                     self.paths_item.update()
@@ -334,6 +360,13 @@ class Canvas(QGraphicsView):
             self._toggle_select(idx, extend=bool(event.modifiers() & Qt.ShiftModifier))
             return
         super().mousePressEvent(event)
+
+    def _start_rubber(self, origin, purpose: str) -> None:
+        self._rubber_origin = origin
+        self._rubber_purpose = purpose
+        self._rubber = QRubberBand(QRubberBand.Rectangle, self)
+        self._rubber.setGeometry(origin.x(), origin.y(), 0, 0)
+        self._rubber.show()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._panning:
@@ -373,12 +406,17 @@ class Canvas(QGraphicsView):
             return
         if self._rubber is not None:
             rect = self._rubber.geometry()
+            purpose = self._rubber_purpose
             self._rubber.hide()
             self._rubber = None
             self._rubber_origin = None
             if rect.width() > 3 and rect.height() > 3:
                 scene_rect = self.mapToScene(rect).boundingRect()
-                self._select_in_rect(scene_rect, extend=bool(event.modifiers() & Qt.ShiftModifier))
+                if purpose == "region":
+                    self.region_drawn.emit(scene_rect)
+                else:
+                    self._select_in_rect(
+                        scene_rect, extend=bool(event.modifiers() & Qt.ShiftModifier))
             return
         super().mouseReleaseEvent(event)
 

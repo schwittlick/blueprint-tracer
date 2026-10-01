@@ -38,6 +38,7 @@ class TextRegion:
     text: str = ""
     confidence: float = -1.0
     mode: str = "trace"                 # "trace" | "hershey" | "hide"
+    source: str = "detected"            # "detected" | "manual" (drawn by the user)
 
     @property
     def bbox(self) -> tuple[int, int, int, int]:
@@ -105,6 +106,70 @@ def detect_text_regions(
     for i, r in enumerate(regions):
         r.id = i
     return regions
+
+
+def manual_region(x: float, y: float, width: float, height: float,
+                  region_id: int = -1) -> TextRegion:
+    """Build a region from a box the user drew around lettering the detector missed.
+
+    The detector is deliberately conservative (see the module docstring), so the
+    labels it declines to claim -- an isolated word, lettering wound into the
+    line-work, a size far off the page's dominant one -- are exactly the ones worth
+    marking by hand. Such a region behaves like any other from here on: it can be
+    recognized, lettered in Hershey, or hidden.
+
+    Orientation is read from the box's shape, since that is the only evidence
+    available: a taller-than-wide box is a vertical label. The character height
+    follows from the same reading, and is what fits Hershey lettering into the box.
+    """
+    x, y = int(round(x)), int(round(y))
+    width, height = max(1, int(round(width))), max(1, int(round(height)))
+    orientation = "vertical" if height > width else "horizontal"
+    char_height = float(width if orientation == "vertical" else height)
+    return TextRegion(
+        id=region_id, x=x, y=y, width=width, height=height,
+        char_height=char_height, n_glyphs=0, orientation=orientation,
+        source="manual",
+    )
+
+
+def merge_regions(detected: list[TextRegion], manual: list[TextRegion],
+                  scale: float = 1.0) -> list[TextRegion]:
+    """Combine a fresh detection with the user's hand-drawn regions.
+
+    Re-tracing rebuilds the detected regions from nothing, so the manual ones have
+    to be carried across explicitly or every parameter tweak would erase them.
+    ``scale`` converts them into the new page's pixels: supersampling and preview
+    downscaling both change how many pixels the page has, and a box kept verbatim
+    would land somewhere else on the drawing.
+
+    Where the detector has since found the same lettering, the hand-drawn box wins
+    -- it is the user's explicit statement about that ink, and keeping both would
+    describe it twice.
+
+    The manual regions are rescaled and renumbered in place: the caller holds the
+    very objects the review panel is bound to, so replacing them with copies would
+    strand the panel on regions no longer in the drawing.
+    """
+    kept: list[TextRegion] = []
+    for r in manual:
+        if scale != 1.0:
+            r.x = int(round(r.x * scale))
+            r.y = int(round(r.y * scale))
+            r.width = max(1, int(round(r.width * scale)))
+            r.height = max(1, int(round(r.height * scale)))
+            r.char_height = r.char_height * scale
+        kept.append(r)
+
+    for r in detected:
+        if any(_iou(r, m) > 0.35 or _containment(r, m) > 0.7 for m in kept):
+            continue
+        kept.append(r)
+
+    kept.sort(key=lambda r: (r.y, r.x))
+    for i, r in enumerate(kept):
+        r.id = i
+    return kept
 
 
 def _glyph_candidates(

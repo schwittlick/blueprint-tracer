@@ -34,7 +34,7 @@ from blueprint_tracer.gui.canvas import Canvas
 from blueprint_tracer.gui.edit_tools import EditState
 from blueprint_tracer.gui.params_panel import ParamsPanel
 from blueprint_tracer.gui.project import load_project, save_project
-from blueprint_tracer.core import hershey, ocr
+from blueprint_tracer.core import hershey, ocr, text as text_core
 from blueprint_tracer.gui.text_panel import TextPanel
 from blueprint_tracer.gui.worker import OcrWorker, TraceWorker
 
@@ -63,12 +63,16 @@ def _out_path(name: str) -> str:
     return os.path.join(_project_dir("out"), name)
 
 
-def _carry_over_decisions(old_regions: list, new_regions: list) -> None:
+def _carry_over_decisions(old_regions: list, new_regions: list, scale: float = 1.0) -> None:
     """Copy review decisions from a previous detection onto a fresh one.
 
     Re-tracing rebuilds the regions from scratch, so without this every parameter
     tweak would quietly reset the text, confidence and mode the user had settled on.
     Regions are matched by overlapping position, which survives small shifts.
+
+    ``scale`` maps the old boxes into the new page's pixels. Switching between the
+    downscaled preview and a full-resolution trace changes the page size outright,
+    and unscaled boxes would then overlap nothing and match nothing.
     """
     reviewed = [r for r in old_regions if r.mode != "trace" or r.text]
     if not reviewed or not new_regions:
@@ -76,13 +80,14 @@ def _carry_over_decisions(old_regions: list, new_regions: list) -> None:
     for fresh in new_regions:
         best, best_score = None, 0.0
         for old in reviewed:
-            ix = max(0, min(fresh.x + fresh.width, old.x + old.width) - max(fresh.x, old.x))
-            iy = max(0, min(fresh.y + fresh.height, old.y + old.height) - max(fresh.y, old.y))
+            ox, oy = old.x * scale, old.y * scale
+            ow, oh = old.width * scale, old.height * scale
+            ix = max(0.0, min(fresh.x + fresh.width, ox + ow) - max(fresh.x, ox))
+            iy = max(0.0, min(fresh.y + fresh.height, oy + oh) - max(fresh.y, oy))
             inter = ix * iy
             if not inter:
                 continue
-            score = inter / float(min(fresh.width * fresh.height,
-                                      old.width * old.height) or 1)
+            score = inter / float(min(fresh.width * fresh.height, ow * oh) or 1)
             if score > best_score:
                 best, best_score = old, score
         if best is not None and best_score > 0.6:
@@ -105,6 +110,9 @@ class MainWindow(QMainWindow):
         self.dirty_edits = False
         self.text_paths: list = []   # Hershey lettering standing in for regions
         self._pending_restore = None  # project work waiting for its trace to land
+        # Page width the current region boxes are measured in, so hand-drawn ones
+        # can be moved onto a re-traced page of a different size.
+        self._region_page_width = 0
 
         # Left view shows the scan alone, the main view carries the vectors. In
         # side-by-side mode neither view holds the other's layer, so the heavy
@@ -145,6 +153,7 @@ class MainWindow(QMainWindow):
         dock.raise_()
 
         self.text_panel.region_selected.connect(self._focus_region)
+        self.text_panel.region_removed.connect(self._remove_region)
         self.text_panel.modes_changed.connect(self._apply_region_modes)
         self.text_panel.text_edited.connect(lambda _id: self._apply_region_modes())
         self.text_panel.ocr_requested.connect(self.run_ocr)
@@ -173,6 +182,9 @@ class MainWindow(QMainWindow):
         self.canvas.selection_changed.connect(self._update_selection_status)
         self.canvas.edit_started.connect(self._on_edit_started)
         self.canvas.paths_edited.connect(self._on_paths_edited)
+        self.canvas.region_drawn.connect(self._add_region)
+        self.canvas.region_mode_exited.connect(
+            lambda: self.act_add_region.setChecked(False))
 
     # --- setup ---
 
@@ -193,14 +205,28 @@ class MainWindow(QMainWindow):
         self.act_undo.triggered.connect(self.undo)
         self.act_redo = QAction("&Redo", self, shortcut=QKeySequence.Redo)
         self.act_redo.triggered.connect(self.redo)
-        self.act_delete = QAction("&Delete selected", self, shortcut=QKeySequence.Delete)
+        self.act_delete = QAction("&Delete selected", self)
+        # Backspace as well as Delete: it is what the hand reaches for, and laptop
+        # keyboards do not all carry a Del key.
+        self.act_delete.setShortcuts([QKeySequence.Delete, QKeySequence(Qt.Key_Backspace)])
+        self.act_delete.setToolTip("Delete the selected strokes (Del or Backspace)")
         self.act_delete.triggered.connect(lambda: self._edit_op("delete"))
         self.act_join = QAction("&Join selected", self, shortcut="J")
+        self.act_join.setToolTip("Join the selected strokes end to end (J)")
         self.act_join.triggered.connect(lambda: self._edit_op("join"))
         self.act_straighten = QAction("S&traighten", self, shortcut="T")
+        self.act_straighten.setToolTip("Reduce the selected strokes to straight lines (T)")
         self.act_straighten.triggered.connect(lambda: self._edit_op("straighten"))
         self.act_select_all = QAction("Select &all", self, shortcut=QKeySequence.SelectAll)
         self.act_select_all.triggered.connect(self.select_all)
+        self.act_add_region = QAction("Add text &region", self, checkable=True)
+        self.act_add_region.setShortcut("R")
+        self.act_add_region.setToolTip(
+            "Drag a box around lettering the detector missed (R).\n"
+            "It then behaves like any other region: recognize it, letter it in\n"
+            "Hershey, or hide it — without deleting the strokes underneath."
+        )
+        self.act_add_region.toggled.connect(self._toggle_region_mode)
         self.act_retrace = QAction("&Re-trace", self, shortcut="Ctrl+R")
         self.act_retrace.triggered.connect(lambda: self._retrace(full=True))
         self.act_fit = QAction("&Fit view", self, shortcut="Ctrl+0")
@@ -217,7 +243,7 @@ class MainWindow(QMainWindow):
             m.addAction(a)
         m = self.menuBar().addMenu("&Edit")
         for a in (self.act_undo, self.act_redo, self.act_delete, self.act_join,
-                  self.act_straighten, self.act_select_all):
+                  self.act_straighten, self.act_select_all, self.act_add_region):
             m.addAction(a)
         m = self.menuBar().addMenu("&View")
         m.addAction(self.act_side_by_side)
@@ -248,6 +274,8 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
         tb.addAction(self.act_side_by_side)
+        tb.addSeparator()
+        tb.addAction(self.act_add_region)
         tb.addSeparator()
         tb.addAction(self.act_delete)
         tb.addAction(self.act_join)
@@ -291,9 +319,9 @@ class MainWindow(QMainWindow):
         self._pending_restore = None
         self.edits.set_paths(paths)
         if regions and self.result is not None:
-            self.result.text_regions = regions
-            self.canvas.set_regions(regions, self.result.width, self.result.height)
-            self.text_panel.set_regions(regions, self.result.gray)
+            # The saved region tags describe hand-edited paths, so keep them rather
+            # than re-deriving tags for geometry the detector never saw.
+            self._set_regions(regions, reassign=False)
         self._show_paths()
         self._apply_region_modes()
         self.statusBar().showMessage(
@@ -494,11 +522,16 @@ class MainWindow(QMainWindow):
                 self.canvas.restore_view_state(view)
                 self._sync_views(self.canvas, self.source_canvas)
         # A re-trace produces brand new regions; carry the review decisions over so
-        # nudging a parameter does not silently discard them.
-        _carry_over_decisions(self.text_panel.regions, result.text_regions)
+        # nudging a parameter does not silently discard them, and re-place the
+        # hand-drawn boxes, which no amount of detection will ever reproduce.
+        scale = (result.width / self._region_page_width) if self._region_page_width else 1.0
+        old_regions = list(self.text_panel.regions)
+        _carry_over_decisions(old_regions, result.text_regions, scale)
+        manual = [r for r in old_regions if getattr(r, "source", "detected") == "manual"]
         self._show_paths()
-        self.canvas.set_regions(result.text_regions, result.width, result.height)
-        self.text_panel.set_regions(result.text_regions, result.gray)
+        self._set_regions(
+            text_core.merge_regions(result.text_regions, manual, scale)
+        )
         if self._pending_restore is not None:
             self._apply_restore()
         self._apply_region_modes()
@@ -538,6 +571,83 @@ class MainWindow(QMainWindow):
         self.canvas.set_regions_visible(on)
         if on:
             self.text_dock.raise_()
+
+    def _sync_canvas_mode(self) -> None:
+        """Three jobs share the left button, so derive the mode from the toggles."""
+        if self.act_add_region.isChecked():
+            self.canvas.mode = "region"
+        elif self.chk_nodes.isChecked():
+            self.canvas.mode = "node"
+        else:
+            self.canvas.mode = "select"
+        self.canvas.setCursor(
+            Qt.CrossCursor if self.canvas.mode == "region" else Qt.ArrowCursor)
+
+    def _toggle_region_mode(self, on: bool) -> None:
+        if on:
+            self.chk_nodes.setChecked(False)
+            # Drawing boxes you cannot see is guesswork.
+            self.chk_text.setChecked(True)
+            self.text_dock.raise_()
+            self.statusBar().showMessage(
+                "drawing text regions — drag a box around the lettering · "
+                "Esc or R to go back to selecting strokes", 10000)
+        else:
+            self.statusBar().showMessage("selecting strokes", 3000)
+        self._sync_canvas_mode()
+
+    def _set_regions(self, regions: list, reassign: bool = True) -> None:
+        """Publish a changed region set to the canvas, the panel and the paths.
+
+        Ids are renumbered whenever the set changes, so the region tags on the paths
+        must be recomputed with it -- otherwise hiding a region acts on whichever
+        strokes happen to hold the old number. ``reassign`` is off only when
+        restoring a project, whose saved tags already describe hand-edited paths
+        that no re-derivation could reproduce.
+        """
+        if self.result is not None:
+            self.result.text_regions = regions
+            self._region_page_width = self.result.width
+        if reassign:
+            text_core.assign_paths(self.edits.paths, regions)
+        width = self.result.width if self.result else 1
+        height = self.result.height if self.result else 1
+        page = self.result.gray if self.result else None
+        self.canvas.set_regions(regions, width, height)
+        self.text_panel.set_regions(regions, page)
+
+    def _add_region(self, rect) -> None:
+        """Turn a box the user dragged out into a text region."""
+        if self.result is None:
+            return
+        # Clamp to the page: a box hanging off the edge describes ink that is not
+        # there, and its OCR crop would be part empty strip.
+        x0 = max(0.0, min(rect.left(), self.result.width - 2.0))
+        y0 = max(0.0, min(rect.top(), self.result.height - 2.0))
+        x1 = min(float(self.result.width), max(rect.right(), x0 + 1.0))
+        y1 = min(float(self.result.height), max(rect.bottom(), y0 + 1.0))
+        if x1 - x0 < 2.0 or y1 - y0 < 2.0:
+            self.statusBar().showMessage("box too small — drag across the lettering", 3000)
+            return
+
+        region = text_core.manual_region(x0, y0, x1 - x0, y1 - y0)
+        self._set_regions(text_core.merge_regions(self.result.text_regions, [region]))
+        self._apply_region_modes()
+        # Land the caret in the Text cell: typing the label is the whole point of
+        # having drawn the box.
+        self.text_panel.begin_edit(region.id)
+        self.statusBar().showMessage(
+            f"added region {region.id} ({region.orientation}) — type the label, "
+            f"then set its mode to hershey", 6000)
+
+    def _remove_region(self, region_id: int) -> None:
+        regions = [r for r in (self.result.text_regions if self.result else [])
+                   if r.id != region_id]
+        for i, r in enumerate(regions):
+            r.id = i
+        self._set_regions(regions)
+        self._apply_region_modes()
+        self.statusBar().showMessage(f"removed region {region_id}", 3000)
 
     def _focus_region(self, region_id: int) -> None:
         for region in self.result.text_regions if self.result else []:
@@ -615,9 +725,11 @@ class MainWindow(QMainWindow):
             f"replaced or hidden", 4000)
 
     def _toggle_node_mode(self, on: bool) -> None:
-        self.canvas.mode = "node" if on else "select"
+        if on:
+            self.act_add_region.setChecked(False)
         self.canvas.paths_item.show_nodes = on
         self.canvas.paths_item.update()
+        self._sync_canvas_mode()
 
     def _on_edit_started(self, index: int) -> None:
         self.edits.snapshot_for_edit([index], "move node")
@@ -680,6 +792,19 @@ class MainWindow(QMainWindow):
         self.act_undo.setEnabled(self.edits.can_undo)
         self.act_redo.setEnabled(self.edits.can_redo)
         self.act_export.setEnabled(bool(self.edits.paths))
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        """Escape leaves region mode wherever the focus happens to be.
+
+        Adding a region parks the caret in the dock's text cell, so the canvas is
+        not the widget hearing the key. Handling it here catches the leftovers of
+        the chain: a cell editor claims the first Escape to cancel itself, and the
+        next one reaches the window and puts the left button back to selecting.
+        """
+        if event.key() == Qt.Key_Escape and self.act_add_region.isChecked():
+            self.act_add_region.setChecked(False)
+            return
+        super().keyPressEvent(event)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.worker.stop()
